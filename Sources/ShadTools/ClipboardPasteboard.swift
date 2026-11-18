@@ -2,6 +2,11 @@ import AppKit
 import ImageIO
 import UniformTypeIdentifiers
 
+enum ClipboardMember: Equatable, Sendable {
+    case content(ClipboardContent)
+    case representation(ClipboardRepresentation)
+}
+
 /// Keep the separate representations of each pasteboard item together, in source order.
 enum ClipboardPasteboard {
     private static let restored = NSPasteboard.PasteboardType("org.nspasteboard.RestoredType")
@@ -108,6 +113,24 @@ enum ClipboardPasteboard {
 
     static func read(_ board: NSPasteboard, expectedChange: Int, frontmostBundleID: String?) -> [ClipboardContent] {
         capture(board, expectedChange: expectedChange, frontmostBundleID: frontmostBundleID).map { [$0.content] } ?? []
+    }
+
+    /// Decode the saved archive locally. A group's primary preview may describe just
+    /// its first item. File, sharing, and inspector actions need each ordered member.
+    static func members(of capture: ClipboardCapture) -> [ClipboardMember] {
+        if capture.items.count <= 1 {
+            if case .files(let urls) = capture.content { return urls.map { .content(.files([$0])) } }
+            return [.content(capture.content)]
+        }
+        var members: [ClipboardMember] = []
+        for representations in capture.items {
+            guard let first = representations.first else { return [] }
+            let item = NSPasteboardItem()
+            for rep in representations { item.setData(rep.data, forType: .init(rep.type)) }
+            let member = preview(item).map(ClipboardMember.content) ?? .representation(first)
+            members.append(member)
+        }
+        return members
     }
 
     private static func preview(_ item: NSPasteboardItem) -> ClipboardContent? {

@@ -65,4 +65,41 @@ struct ClipboardInspectorTests {
         #expect(browser.draft == "Unsaved changes")
     }
 
+    @Test @MainActor func groupsKeepWholeEntryActionsAndIdentifyPartialPreviews() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ClipboardStore(directory: directory)
+        let plain = NSPasteboard.PasteboardType.string.rawValue
+        let custom = ClipboardRepresentation(type: "com.example.data", data: Data([1, 3, 4]))
+        let text = ClipboardRepresentation(type: plain, data: Data("Sample".utf8))
+        let mixed = ClipboardCapture(content: .text("Sample"), items: [[custom], [text]])
+        _ = try store.record(mixed, observing: "mixed", at: Date())
+        let board = NSPasteboard(name: .init("io.shadtools.tests." + UUID().uuidString))
+        defer { board.releaseGlobally() }
+        let tool = ClipboardTool(store: store, pasteboard: board, monitor: false)
+        let browser = HistoryBrowser(tool: tool)
+        await tool.synchronize()
+        browser.appear()
+        defer { browser.disappear() }
+        for _ in 0..<100 where browser.content == nil { try await Task.sleep(nanoseconds: 5_000_000) }
+        #expect(browser.inspection.group?.previewLabel == "Previewing item 2 of 2")
+        browser.openMenu(.actions)
+        let actions = Set(browser.availableActions.map(\.id))
+        #expect(Set(["copy", "paste", "share", "save", "chat", "quickLook"]).isSubset(of: actions))
+        #expect(Set(["edit", "snippet", "plain", "annotate"]).isDisjoint(with: actions))
+        browser.beginEdit(.edit)
+        #expect(browser.editor == nil)
+
+        let texts = ClipboardGroupSummary([.content(.text("a")), .content(.text("b"))])
+        #expect(texts?.previewLabel == "Combined text from 2 items")
+        #expect(texts?.previewsOneItem == false)
+        let url = URL(fileURLWithPath: "/tmp/fixture.pdf")
+        let files = ClipboardGroupSummary([.content(.files([url])), .content(.files([url]))])
+        #expect(files?.previewLabel == "2 files")
+        #expect(files?.canAnnotate == true)
+        let images = ClipboardGroupSummary([.content(.image(Data())), .content(.image(Data()))])
+        #expect(images?.previewLabel == "Previewing item 1 of 2")
+        #expect(images?.imageCount == 2)
+    }
+
 }

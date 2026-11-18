@@ -76,9 +76,12 @@ enum ClipboardDeletion: Equatable {
 
     func beginEdit(_ next: ClipboardEditor) {
         guard let selected else { return }
+        if next == .snippet {
+            guard case .text = content, selected.itemCount == 1 || inspection.group?.textCount == selected.itemCount else { return }
+        }
         let value: String
         if next == .edit {
-            guard case .text(let text) = content else { return }
+            guard selected.itemCount == 1, case .text(let text) = content else { return }
             value = text
         } else { value = selected.title }
         resetOverlays()
@@ -112,6 +115,10 @@ enum ClipboardDeletion: Equatable {
     }
 
     private func actions(for entry: ClipboardEntry, tool: ClipboardTool) -> [ClipboardUIAction] {
+        let grouped = entry.itemCount > 1
+        let group = inspection.group
+        let completeText = !grouped || group?.textCount == entry.itemCount
+        let completeFiles = !grouped || group?.fileCount == entry.itemCount
         var items: [ClipboardUIAction] = []
         func add(_ id: String, _ title: String, _ symbol: String, _ shortcut: String = "", _ run: @escaping @MainActor () -> Void) {
             items.append(ClipboardUIAction(id: id, title: title, symbol: symbol, shortcut: shortcut, run: run))
@@ -120,43 +127,44 @@ enum ClipboardDeletion: Equatable {
         add("copy", "Copy to Clipboard", "doc.on.doc", "⌘↵") { tool.copy(entry) }
         add("stay", "Paste and Keep Window Open", "rectangle.on.rectangle", "⌥↵") { tool.paste(entry, keepOpen: true) }
         if !formats.isEmpty { add("formats", "Paste as…", "square.stack.3d.up") { self.openMenu(.formats) } }
-        if case .text = content {
+        if case .text = content, formats.contains(NSPasteboard.PasteboardType.string.rawValue) {
             add("plain", tool.pasteTargetName.map { "Paste as Plain Text to " + $0 } ?? "Paste as Plain Text",
                 "text.alignleft") { tool.paste(entry, as: NSPasteboard.PasteboardType.string.rawValue) }
         }
         add("share", "Share…", "square.and.arrow.up") {
             if let anchor = self.hostPanel?.contentView { tool.share(entry, from: anchor) }
         }
-        if case .text = content {
+        if !grouped, case .text = content {
             add("edit", "Edit Content…", "pencil") { self.beginEdit(.edit) }
         }
         add("rename", "Rename Entry…", "character.cursor.ibeam", "⌘E") { self.beginEdit(.rename) }
-        items += ClipboardExtraActions.actions(for: entry, content: content, tool: tool)
-        if entry.kind == .link || entry.kind == .email || entry.kind == .files {
+        items += ClipboardExtraActions.actions(for: entry, content: content, tool: tool).filter { completeText || $0.id == "chat" }
+        if (!grouped && (entry.kind == .link || entry.kind == .email)) || (completeFiles && entry.kind == .files) {
             let title = entry.kind == .email ? "Compose Email" : entry.kind == .link ? "Open Link" : "Open Files"
             add("open", title, "arrow.up.forward.app") { tool.open(entry) }
         }
-        if entry.kind == .image || entry.kind == .files {
+        if entry.kind == .image || entry.kind == .files || grouped {
             add("openWith", "Open With…", "arrow.up.forward.square") { tool.openWith(entry) }
             add("reveal", "Show in Finder", "folder") { tool.reveal(entry) }
-            if entry.kind == .image {
+            if (!grouped && entry.kind == .image) || group?.canAnnotate == true {
                 add("annotate", "Annotate in Preview", "pencil.tip.crop.circle") { tool.annotate(entry) }
             }
             add("quickLook", "Quick Look", "eye") { tool.quickLook(entry) }
         }
-        if entry.kind == .files { add("paths", "Copy File Paths", "link") { tool.copyFilePaths(entry) } }
+        if entry.kind == .files && completeFiles { add("paths", "Copy File Paths", "link") { tool.copyFilePaths(entry) } }
         if !entry.isSnippet {
             add("pin", entry.isPinned ? "Unpin Entry" : "Pin Entry", entry.isPinned ? "pin.slash" : "pin", "⌘.") {
                 tool.setPinned(!entry.isPinned, for: entry)
             }
-            if case .text = content {
-                add("snippet", "Save as Snippet…", "text.quote") { self.beginEdit(.snippet) }
+            if completeText, case .text = content {
+                add("snippet", grouped ? "Save Combined Text as Snippet…" : "Save as Snippet…", "text.quote") { self.beginEdit(.snippet) }
             }
         }
-        add("save", "Save as File…", "square.and.arrow.down") { tool.saveAsFile(entry) }
-        if entry.kind == .image {
-            add("ocr", "Copy Text from Image", "text.viewfinder") { tool.copyRecognizedText(entry) }
-            add("qr", "Copy Text from QR Code", "qrcode.viewfinder") { tool.copyQRCode(entry) }
+        add("save", grouped ? "Save as Files…" : "Save as File…", "square.and.arrow.down") { tool.saveAsFile(entry) }
+        if (!grouped && entry.kind == .image) || (group?.imageCount ?? 0) > 0 {
+            let multiple = (group?.imageCount ?? 0) > 1
+            add("ocr", multiple ? "Copy Text from Images" : "Copy Text from Image", "text.viewfinder") { tool.copyRecognizedText(entry) }
+            add("qr", multiple ? "Copy Text from QR Codes" : "Copy Text from QR Code", "qrcode.viewfinder") { tool.copyQRCode(entry) }
         }
         add("delete", entry.isSnippet ? "Delete Snippet" : "Delete Entry", "trash", "⌘X") { tool.remove(entry) }
         if !entry.isSnippet {

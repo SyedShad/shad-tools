@@ -132,6 +132,64 @@ struct ClipboardToolTests {
         #expect(board.pasteboardItems?.compactMap { $0.string(forType: .fileURL) } == files.map(\.absoluteString))
     }
 
+    @Test @MainActor func groupedActionsShareExportAndPreviewEveryOriginalMemberInOrder() throws {
+        let board = NSPasteboard.withUniqueName()
+        defer { board.releaseGlobally() }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        func solidPNG(_ color: CGColor) throws -> Data {
+            let cx = try #require(CGContext(data: nil, width: 8, height: 8, bitsPerComponent: 8, bytesPerRow: 32,
+                                           space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+            cx.setFillColor(color)
+            cx.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
+            let image = try #require(cx.makeImage())
+            return try #require(NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]))
+        }
+        let red = try solidPNG(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+        let blue = try solidPNG(CGColor(red: 0, green: 0, blue: 1, alpha: 1))
+        let raw = Data([1, 2, 3])
+        let unknown = NSPasteboard.PasteboardType("com.example.synthetic-clip")
+        let sets: [[(NSPasteboard.PasteboardType, Data)]] = [
+            [(.string, Data("first item".utf8)), (.png, red)],
+            [(.png, red), (.png, blue)],
+            [(.png, red), (unknown, raw), (.string, Data("last item".utf8))]
+        ]
+        for (number, set) in sets.enumerated() {
+            let items = set.map { format, data in
+                let item = NSPasteboardItem()
+                item.setData(data, forType: format)
+                return item
+            }
+            board.clearContents()
+            #expect(board.writeObjects(items))
+            let capture = try #require(ClipboardPasteboard.capture(board, expectedChange: board.changeCount, frontmostBundleID: nil))
+            let store = ClipboardStore(directory: root.appendingPathComponent("db"))
+            #expect(try store.record(capture, observing: "fixture-" + String(number), at: Date()))
+            let entry = try #require(try store.entries().first)
+            let archived = try #require(try store.capture(for: entry.id))
+            let contents = try ClipboardFileActions.contents(of: archived, root: root)
+            #expect(contents.count == set.count)
+            let sharing = try ClipboardFileActions.sharingItems(for: contents)
+            #expect(sharing.count == set.count)
+            for ((format, data), object) in zip(set, sharing) {
+                if format == .string { #expect(object as? String == String(decoding: data, as: UTF8.self)) }
+                else if format == .png { #expect(object is NSImage) }
+                else { #expect(try Data(contentsOf: #require(object as? URL)) == data) }
+            }
+            let urls = try ClipboardFileActions.fileURLs(for: entry, contents: contents, action: .quickLook, root: root)
+            #expect(try urls.map { try Data(contentsOf: $0) } == set.map(\.1))
+            let destination = root.appendingPathComponent("saved-" + String(number))
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+            try ClipboardFileActions.exportGroup(urls, into: destination)
+            let exported = try FileManager.default.contentsOfDirectory(at: destination, includingPropertiesForKeys: nil)
+            #expect(exported.count == set.count)
+            for (member, url) in zip(set, urls) {
+                #expect(try Data(contentsOf: destination.appendingPathComponent(url.lastPathComponent)) == member.1)
+            }
+        }
+    }
+
     @Test func preservesNativeColorAndItsAlphaValue() throws {
         let board = NSPasteboard.withUniqueName()
         defer { board.releaseGlobally() }

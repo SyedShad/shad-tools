@@ -186,14 +186,16 @@ import UniformTypeIdentifiers
         catch { issue = "Couldn’t search saved snippets."; return [] }
     }
 
-    private func capture(for entry: ClipboardEntry) async -> ClipboardCapture? {
+    func capture(for entry: ClipboardEntry) async -> ClipboardCapture? {
         do { return try await perform { try $0.capture(for: entry.id) } }
         catch { issue = "Couldn’t read the saved formats."; return nil }
     }
 
-    func formats(for entry: ClipboardEntry) async -> [String] {
-        guard let capture = await capture(for: entry) else { return [] }
-        return ClipboardPasteboard.formats(capture)
+    func members(for entry: ClipboardEntry) async -> [ClipboardContent]? {
+        guard let capture = await capture(for: entry) else { Feedback.show("This clipboard entry is unavailable."); return nil }
+        do {
+            return try await Task.detached(priority: .userInitiated) { try ClipboardFileActions.contents(of: capture) }.value
+        } catch { Feedback.show("Couldn’t read all the items in this clipboard entry."); return nil }
     }
 
     func setPinned(_ value: Bool, for entry: ClipboardEntry) { modify { try $0.setPinned(entry.id, value) } }
@@ -286,7 +288,12 @@ import UniformTypeIdentifiers
     private func indexImagesIfNeeded() {
         guard imageIndexing == nil, !paused else { return }
         attemptedOCR.formIntersection(entries.map(\.id))
-        let pending = entries.filter { $0.kind == .image && $0.recognizedText == nil && !attemptedOCR.contains($0.id) }.map(\.id)
+        let pending = entries.filter { entry in
+            let images = entry.kind == .image || (entry.itemCount > 1 && entry.formatTypes.contains {
+                UTType($0)?.conforms(to: .image) == true
+            })
+            return images && entry.recognizedText == nil && !attemptedOCR.contains(entry.id)
+        }.map(\.id)
         guard !pending.isEmpty else { return }
         attemptedOCR.formUnion(pending)
         let store = self.store
@@ -296,8 +303,8 @@ import UniformTypeIdentifiers
                 let saved = await Task.detached(priority: .utility) {
                     autoreleasepool {
                         do {
-                            guard case .image(let data) = try store.content(for: id) else { return false }
-                            let text = try ClipboardImageRecognition.text(in: data)
+                            guard let capture = try store.capture(for: id) else { return false }
+                            let text = try Self.recognition(in: capture, qr: false)
                             try store.setRecognizedText(text, for: id)
                             return true
                         } catch { return false }
@@ -310,6 +317,15 @@ import UniformTypeIdentifiers
         }
     }
 
+    nonisolated private static func recognition(in capture: ClipboardCapture, qr: Bool) throws -> String {
+        let results = try ClipboardPasteboard.members(of: capture).compactMap { member -> String? in
+            guard case .content(.image(let data)) = member else { return nil }
+            let text = try qr ? ClipboardImageRecognition.qrCodes(in: data) : ClipboardImageRecognition.text(in: data)
+            return text.isEmpty ? nil : text
+        }
+        return results.joined(separator: "\n")
+    }
+
     func copyRecognizedText(_ entry: ClipboardEntry) { copyImageText(entry, qr: false) }
     func copyQRCode(_ entry: ClipboardEntry) { copyImageText(entry, qr: true) }
 
@@ -319,10 +335,8 @@ import UniformTypeIdentifiers
                 let text: String
                 if !qr, let cached = entry.recognizedText { text = cached }
                 else {
-                    guard case .image(let data) = await content(for: entry) else { return }
-                    text = try await Task.detached(priority: .userInitiated) {
-                        try qr ? ClipboardImageRecognition.qrCodes(in: data) : ClipboardImageRecognition.text(in: data)
-                    }.value
+                    guard let capture = await capture(for: entry) else { return }
+                    text = try await Task.detached(priority: .userInitiated) { try Self.recognition(in: capture, qr: qr) }.value
                     if !qr { try await perform { try $0.setRecognizedText(text, for: entry.id) }; await didChange() }
                 }
                 guard !text.isEmpty else { Feedback.show(qr ? "No QR code found in this image." : "No text found in this image."); return }
@@ -340,22 +354,29 @@ import UniformTypeIdentifiers
 
     private func fileAction(_ action: ClipboardFileActions.Action, _ entry: ClipboardEntry) {
         Task {
-            guard let value = await content(for: entry) else { Feedback.show("This entry is unavailable."); return }
+            guard let capture = await capture(for: entry) else { Feedback.show("This entry is unavailable."); return }
             if action != .quickLook { window.hide() }
-            await fileActions.run(action, on: entry, content: value)
+            await fileActions.run(action, on: entry, capture: capture)
         }
     }
 
     func share(_ entry: ClipboardEntry, from anchor: NSView) {
         Task {
-            guard let value = await content(for: entry), anchor.window != nil else { return }
-            fileActions.share(value, from: anchor)
+            guard let capture = await capture(for: entry), anchor.window != nil else { return }
+            await fileActions.share(capture, from: anchor)
         }
     }
 
     func copyFilePaths(_ entry: ClipboardEntry) {
         Task {
-            guard case .files(let urls) = await content(for: entry) else { return }
+            guard let capture = await capture(for: entry) else { return }
+            let urls = await Task.detached(priority: .userInitiated) {
+                ClipboardPasteboard.members(of: capture).flatMap { member -> [URL] in
+                    if case .content(.files(let files)) = member { return files }
+                    return []
+                }
+            }.value
+            guard !urls.isEmpty else { Feedback.show("This entry contains no file paths."); return }
             copyText(urls.map(\.path).joined(separator: "\n"))
         }
     }

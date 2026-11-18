@@ -479,7 +479,9 @@ final class ClipboardStore: Sendable {
 
     func setRecognizedText(_ text: String, for id: String) throws {
         try withDatabase { db in
-            try statement(db, "UPDATE entries SET ocr=? WHERE id=? AND kind='image'") { stmt in
+            // A group can lead with text and also contain images. An edit collapses
+            // it to one text item, which should reject a late result from that group.
+            try statement(db, "UPDATE entries SET ocr=? WHERE id=? AND (kind='image' OR item_count>1)") { stmt in
                 try bind(text, at: 1, to: stmt)
                 try bind(id, at: 2, to: stmt)
                 try step(stmt)

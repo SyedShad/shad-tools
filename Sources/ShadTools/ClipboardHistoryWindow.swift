@@ -166,12 +166,17 @@ final class HistoryBrowser: ObservableObject {
         guard let entry, let tool else { return }
         previewTask = Task { [weak self, weak tool] in
             guard let tool else { return }
-            guard let content = await tool.content(for: entry) else {
+            guard let capture = await tool.capture(for: entry) else {
                 if !Task.isCancelled { self?.preview = .unavailable }
                 return
             }
             guard !Task.isCancelled else { return }
-            let inspectionTask = Task.detached(priority: .userInitiated) { ClipboardInspection.inspect(content) }
+            let content = capture.content
+            let inspectionTask = Task.detached(priority: .userInitiated) {
+                var result = ClipboardInspection.inspect(content)
+                if entry.itemCount > 1 { result.group = ClipboardGroupSummary(ClipboardPasteboard.members(of: capture)) }
+                return result
+            }
             let result = await withTaskCancellationHandler {
                 await inspectionTask.value
             } onCancel: { inspectionTask.cancel() }
@@ -179,9 +184,7 @@ final class HistoryBrowser: ObservableObject {
             self?.content = content
             self?.inspection = result
             self?.preview = result.preview
-            let available = await tool.formats(for: entry)
-            guard !Task.isCancelled, self?.selectedID == entry.id else { return }
-            self?.formats = available
+            self?.formats = ClipboardPasteboard.formats(capture)
         }
     }
 
@@ -548,6 +551,9 @@ private struct HistoryView: View {
                 }
                 Text(entry.historyTitle).font(.system(size: 14, weight: .medium)).lineLimit(1).truncationMode(.tail)
                 Spacer(minLength: 4)
+                if entry.itemCount > 1 {
+                    Text("\(entry.itemCount) items").font(.caption).foregroundStyle(secondary)
+                }
                 if entry.isPinned { Image(systemName: "pin.fill").font(.caption2).foregroundStyle(secondary).accessibilityLabel("Pinned") }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 8).frame(height: 42)
                 .background(selected ? selection : .clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
@@ -555,7 +561,8 @@ private struct HistoryView: View {
         }
         .buttonStyle(.plain)
         .simultaneousGesture(TapGesture(count: 2).onEnded { browser.select(entry.id); browser.paste() })
-        .accessibilityLabel(entry.historyTitle).accessibilityValue(entry.kind.historyLabel)
+        .accessibilityLabel(entry.historyTitle)
+        .accessibilityValue(entry.itemCount > 1 ? "\(entry.itemCount) clipboard items" : entry.kind.historyLabel)
         .accessibilityAddTraits(selected ? .isSelected : [])
         .contextMenu {
             Button("Actions…") { browser.select(entry.id); browser.openMenu(.actions) }

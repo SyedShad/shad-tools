@@ -6,7 +6,7 @@ Press **Control + Option + Command + V** in any app. Use **↑** and **↓** to 
 
 ## Inspect an entry
 
-The preview shows the copied text, image, file list, link, email address or color swatch. Scroll the **Information** section for the source application, type, size, copy count, time and available paste formats. Shad uses the source identified by the pasteboard when available, and otherwise uses the app in front when it observes the copy. Repeated copies show the first and last recorded times. Text entries also have character, word and line counts. Images have pixel dimensions. A copied file group shows its file names and paths together.
+The preview shows the copied text, image, file list, link, email address or color swatch. Scroll the **Information** section for the source application, type, size, copy count, time and available paste formats. Shad uses the source identified by the pasteboard when available, and otherwise uses the app in front when it observes the copy. Repeated copies show the first and last recorded times. Text entries also have character, word and line counts. Images have pixel dimensions. A copied file group shows its file names and paths together. A copy containing multiple kinds of content stays one history entry. Its preview identifies the group, and Share and Save include its members in their original order.
 
 Type in the history search to find content, renamed entries, file paths, source application names or recognized text in images. **⌘P** opens the type filter, including pinned entries and saved snippets. With an entry selected, click **Actions** or press **⌘K** to search the actions for that item.
 

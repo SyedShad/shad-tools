@@ -53,9 +53,60 @@ struct ClipboardProperty: Identifiable {
     init(_ name: String, _ value: String) { self.name = name; self.value = value }
 }
 
+struct ClipboardGroupSummary {
+    let count: Int
+    let textCount: Int
+    let imageCount: Int
+    let fileCount: Int
+    let otherCount: Int
+    let firstPreviewIndex: Int
+    let canAnnotate: Bool
+
+    init?(_ members: [ClipboardMember]) {
+        guard members.count > 1 else { return nil }
+        var texts = 0, images = 0, files = 0, other = 0
+        var supportedFiles = true
+        var first: Int?
+        for (index, member) in members.enumerated() {
+            switch member {
+            case .content(.text): texts += 1
+            case .content(.image): images += 1
+            case .content(.files(let urls)):
+                files += 1
+                supportedFiles = supportedFiles && urls.allSatisfy { url in
+                    guard let type = UTType(filenameExtension: url.pathExtension) else { return false }
+                    return type.conforms(to: .image) || type.conforms(to: .pdf)
+                }
+            case .representation: other += 1; continue
+            }
+            if first == nil { first = index }
+        }
+        count = members.count
+        textCount = texts
+        imageCount = images
+        fileCount = files
+        otherCount = other
+        firstPreviewIndex = first ?? 0
+        canAnnotate = images + files == count && supportedFiles
+    }
+
+    var previewsOneItem: Bool { textCount != count && fileCount != count }
+    var previewLabel: String {
+        if textCount == count { return "Combined text from \(count) items" }
+        if fileCount == count { return "\(count) files" }
+        return "Previewing item \(firstPreviewIndex + 1) of \(count)"
+    }
+    var description: String {
+        [(textCount, "text item", "text items"), (imageCount, "image", "images"),
+         (fileCount, "file", "files"), (otherCount, "other item", "other items")]
+            .filter { $0.0 > 0 }.map { "\($0.0) " + ($0.0 == 1 ? $0.1 : $0.2) }.joined(separator: ", ")
+    }
+}
+
 struct ClipboardInspection {
     var preview: HistoryPreview = .loading
     var properties: [ClipboardProperty] = []
+    var group: ClipboardGroupSummary?
 
     static func inspect(_ content: ClipboardContent) -> ClipboardInspection {
         switch content {
@@ -109,9 +160,14 @@ struct ClipboardInspector: View {
 
     private var rows: [ClipboardProperty] {
         var values = [ClipboardProperty("Source", entry.sourceName ?? entry.sourceBundleID ?? "Not recorded"),
-                      ClipboardProperty("Type", entry.kind.historyLabel)]
-        values += browser.inspection.properties
-        values.append(ClipboardProperty(entry.kind == .files ? "Clipboard size" : "Size", ClipboardInspection.bytes(entry.byteCount)))
+                      ClipboardProperty("Type", entry.itemCount > 1 ? "Clipboard group" : entry.kind.historyLabel)]
+        if let group = browser.inspection.group { values.append(ClipboardProperty("Contents", group.description)) }
+        if browser.inspection.group?.previewsOneItem == true {
+            values += browser.inspection.properties.map { ClipboardProperty("Preview " + $0.name.lowercased(), $0.value) }
+        } else { values += browser.inspection.properties }
+        let sizeLabel = entry.kind == .files ? "Clipboard size" : "Size"
+        let previewOnly = browser.inspection.group?.previewsOneItem == true
+        values.append(ClipboardProperty(previewOnly ? "Preview size" : sizeLabel, ClipboardInspection.bytes(entry.byteCount)))
         if entry.itemCount > 1 { values.append(ClipboardProperty("Clipboard items", entry.itemCount.formatted())) }
         if entry.isSnippet { values.append(ClipboardProperty("Saved", timestamp(entry.copiedAt))) }
         else {
@@ -121,8 +177,9 @@ struct ClipboardInspector: View {
                 values.append(ClipboardProperty("First copied", timestamp(entry.firstCopiedAt)))
             } else { values.append(ClipboardProperty("Copied", timestamp(entry.copiedAt))) }
         }
-        if !browser.formats.isEmpty {
-            let names = browser.formats.map(ClipboardPasteboard.formatName)
+        let formats = entry.itemCount > 1 ? entry.formatTypes : browser.formats
+        if !formats.isEmpty {
+            let names = formats.map(ClipboardPasteboard.formatName)
             values.append(ClipboardProperty("Formats", names.joined(separator: ", ")))
         }
         return values
@@ -134,6 +191,10 @@ struct ClipboardInspector: View {
         GeometryReader { box in
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
+                    if let group = browser.inspection.group {
+                        Label(group.previewLabel, systemImage: "square.stack")
+                            .font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary).padding(.bottom, 8)
+                    }
                     preview.frame(maxWidth: .infinity, alignment: .leading)
                         .frame(height: max(96, min(220, box.size.height * 0.41)))
                         .padding(.bottom, 16)
@@ -160,7 +221,7 @@ struct ClipboardInspector: View {
                         .accessibilityLabel(property.name).accessibilityValue(property.value)
                     }
                     if let recognized = entry.recognizedText, !recognized.isEmpty {
-                        Text("Text in image").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+                        Text(browser.inspection.group.map { $0.imageCount > 1 ? "Text in images" : "Text in image" } ?? "Text in image").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
                             .padding(.top, 15).padding(.bottom, 5)
                         Text(recognized).font(.system(size: 13)).textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)

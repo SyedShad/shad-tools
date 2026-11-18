@@ -10,32 +10,24 @@ final class ClipboardFileActions: NSObject, QLPreviewPanelDataSource, QLPreviewP
     private var sharePicker: NSSharingServicePicker?
     private let workspace = NSWorkspace.shared
 
-    func run(_ action: Action, on entry: ClipboardEntry, content: ClipboardContent) async {
+    nonisolated private static let temporaryRoot = FileManager.default.temporaryDirectory.appendingPathComponent("Shad Clipboard Exports", isDirectory: true)
+
+    func run(_ action: Action, on entry: ClipboardEntry, capture: ClipboardCapture) async {
         do {
+            let contents = try await Task.detached(priority: .userInitiated) {
+                try Self.contents(of: capture)
+            }.value
             if action == .save {
-                try await export(entry: entry, content: content)
+                try await export(entry: entry, contents: contents)
                 return
             }
-            if action == .open, case .text(let text) = content {
-                let url: URL?
-                switch entry.kind {
-                case .link:
-                    let candidate = URL(string: text.trimmingCharacters(in: .whitespacesAndNewlines))
-                    url = ["http", "https", "ftp"].contains(candidate?.scheme?.lowercased() ?? "") ? candidate : nil
-                case .email:
-                    var components = URLComponents()
-                    components.scheme = "mailto"
-                    components.path = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                    url = components.url
-                default: url = nil
-                }
-                if let url {
-                    guard workspace.open(url) else { throw CocoaError(.fileReadUnsupportedScheme) }
-                    return
-                }
+            if action == .open, contents.count == 1, case .text(let text) = contents[0], let url = Self.link(in: text) {
+                guard workspace.open(url) else { throw CocoaError(.fileReadUnsupportedScheme) }
+                return
             }
-            let urls = try await fileURLs(for: entry, content: content, action: action)
-            guard !urls.isEmpty else { throw CocoaError(.fileNoSuchFile) }
+            let urls = try await Task.detached(priority: .userInitiated) {
+                try Self.fileURLs(for: entry, contents: contents, action: action)
+            }.value
             switch action {
             case .reveal: workspace.activateFileViewerSelecting(urls)
             case .quickLook:
@@ -76,61 +68,109 @@ final class ClipboardFileActions: NSObject, QLPreviewPanelDataSource, QLPreviewP
         MainActor.assumeIsolated { previewURLs.indices.contains(index) ? previewURLs[index] as NSURL : nil }
     }
 
-    func share(_ content: ClipboardContent, from anchor: NSView) {
-        let items: [Any]
-        switch content {
-        case .text(let text): items = [text]
-        case .image(let data):
-            guard let image = NSImage(data: data) else { Feedback.show("Couldn’t read this image."); return }
-            items = [image]
-        case .files(let urls): items = urls
-        }
-        let picker = NSSharingServicePicker(items: items)
-        sharePicker = picker
-        let rect = NSRect(x: anchor.bounds.midX, y: anchor.bounds.midY, width: 1, height: 1)
-        picker.show(relativeTo: rect, of: anchor, preferredEdge: .minY)
-    }
-
-    /// Finder, Preview and other apps require real filesystem URLs. Each retained
-    /// history ID gets a reusable temporary file. Finder file references stay intact.
-    private func fileURLs(for entry: ClipboardEntry, content: ClipboardContent, action: Action) async throws -> [URL] {
-        if case .files(let urls) = content {
-            for url in urls where !url.isFileURL || !FileManager.default.fileExists(atPath: url.path) {
-                throw CocoaError(.fileNoSuchFile, userInfo: [NSURLErrorKey: url])
+    nonisolated static func contents(of capture: ClipboardCapture, root: URL? = nil) throws -> [ClipboardContent] {
+        let members = ClipboardPasteboard.members(of: capture)
+        guard !members.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
+        return try members.map { member in
+            switch member {
+            case .content(let content): return content
+            case .representation(let rep):
+                // Preserve an app-specific item even when no visual preview exists.
+                let folder = (root ?? temporaryRoot).appendingPathComponent(digest(rep.data), isDirectory: true)
+                let url = folder.appendingPathComponent(safeFilename(rep.type) + ".bin")
+                try publish(rep.data, at: url)
+                return .files([url])
             }
-            return urls
         }
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("Shad Clipboard Exports", isDirectory: true)
-        return try await Task.detached(priority: .userInitiated) {
-            [try Self.materialize(entry: entry, content: content, action: action, root: root)]
-        }.value
     }
 
-    nonisolated static func materialize(entry: ClipboardEntry, content: ClipboardContent, action: Action, root: URL) throws -> URL {
+    nonisolated private static func link(in text: String) -> URL? {
+        let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch ClipboardKind.classify(value) {
+        case .link: return URL(string: value)
+        case .email:
+            var components = URLComponents()
+            components.scheme = "mailto"
+            components.path = value
+            return components.url
+        default: return nil
+        }
+    }
+
+    static func sharingItems(for contents: [ClipboardContent]) throws -> [Any] {
+        var items: [Any] = []
+        for content in contents {
+            switch content {
+            case .text(let text):
+                if let link = Self.link(in: text) { items.append(link) } else { items.append(text) }
+            case .image(let data):
+                guard let image = NSImage(data: data) else { throw CocoaError(.fileReadCorruptFile) }
+                items.append(image)
+            case .files(let urls): items.append(contentsOf: urls)
+            }
+        }
+        return items
+    }
+
+    func share(_ capture: ClipboardCapture, from anchor: NSView) async {
+        do {
+            let contents = try await Task.detached(priority: .userInitiated) { try Self.contents(of: capture) }.value
+            let items = try Self.sharingItems(for: contents)
+            guard anchor.window?.isVisible == true else { return }
+            let picker = NSSharingServicePicker(items: items)
+            sharePicker = picker
+            let rect = NSRect(x: anchor.bounds.midX, y: anchor.bounds.midY, width: 1, height: 1)
+            picker.show(relativeTo: rect, of: anchor, preferredEdge: .minY)
+        } catch { Feedback.show(error.localizedDescription) }
+    }
+
+    nonisolated static func fileURLs(for entry: ClipboardEntry, contents: [ClipboardContent], action: Action, root: URL? = nil) throws -> [URL] {
+        let root = root ?? temporaryRoot
+        return try contents.enumerated().flatMap { index, content -> [URL] in
+            if case .files(let urls) = content {
+                for url in urls where !url.isFileURL || !FileManager.default.fileExists(atPath: url.path) {
+                    throw CocoaError(.fileNoSuchFile, userInfo: [NSURLErrorKey: url])
+                }
+                return urls
+            }
+            let name = contents.count > 1 ? "Clipboard item " + String(index + 1) : nil
+            return [try materialize(entry: entry, content: content, action: action, root: root, name: name)]
+        }
+    }
+
+    nonisolated private static func digest(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    nonisolated static func materialize(entry: ClipboardEntry, content: ClipboardContent, action: Action, root: URL, name: String? = nil) throws -> URL {
         let data: Data
         switch content {
         case .image(let bytes): data = bytes
         case .text(let text): data = Data(text.utf8)
         case .files: throw CocoaError(.fileReadUnsupportedScheme)
         }
-        let fingerprint = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-        let folder = root.appendingPathComponent(fingerprint, isDirectory: true)
+        let folder = root.appendingPathComponent(digest(data), isDirectory: true)
         let manager = FileManager.default
         let markup = folder.appendingPathComponent("Markup.png")
         let url: URL
         if case .image = content, action == .annotate || (action == .reveal && manager.fileExists(atPath: markup.path)) { url = markup }
-        else { url = folder.appendingPathComponent("Original", isDirectory: true).appendingPathComponent(filename(for: entry, content: content)) }
-        if manager.fileExists(atPath: url.path) { return url }
+        else { url = folder.appendingPathComponent("Original", isDirectory: true).appendingPathComponent(filename(title: name ?? entry.title, content: content)) }
+        try publish(data, at: url)
+        return url
+    }
+
+    nonisolated private static func publish(_ data: Data, at url: URL) throws {
+        let manager = FileManager.default
+        if manager.fileExists(atPath: url.path) { return }
         let parent = url.deletingLastPathComponent()
         try manager.createDirectory(at: parent, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let staging = parent.appendingPathComponent("." + UUID().uuidString)
         defer { try? manager.removeItem(at: staging) }
         try data.write(to: staging)
         // Atomically publish the complete file. Never overwrite a user's saved annotations.
-        if link(staging.path, url.path) != 0 && errno != EEXIST {
+        if Darwin.link(staging.path, url.path) != 0 && errno != EEXIST {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
-        return url
     }
 
     nonisolated static func checkCopyDestination(source: URL, destination: URL) throws {
@@ -147,8 +187,8 @@ final class ClipboardFileActions: NSObject, QLPreviewPanelDataSource, QLPreviewP
         return String((name.isEmpty ? "Clipboard Entry" : name).prefix(85))
     }
 
-    nonisolated private static func filename(for entry: ClipboardEntry, content: ClipboardContent) -> String {
-        let name = safeFilename(entry.title)
+    nonisolated private static func filename(title: String, content: ClipboardContent) -> String {
+        let name = safeFilename(title)
         switch content {
         case .text: return name.lowercased().hasSuffix(".txt") ? name : name + ".txt"
         case .image: return name.lowercased().hasSuffix(".png") ? name : name + ".png"
@@ -156,41 +196,47 @@ final class ClipboardFileActions: NSObject, QLPreviewPanelDataSource, QLPreviewP
         }
     }
 
-    private func export(entry: ClipboardEntry, content: ClipboardContent) async throws {
-        if case .files(let urls) = content, urls.count > 1 {
+    nonisolated static func exportGroup(_ urls: [URL], into directory: URL) throws {
+        let fm = FileManager.default
+        for url in urls { try checkCopyDestination(source: url, destination: directory) }
+        let staging = directory.appendingPathComponent(".shad-export-" + UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: staging, withIntermediateDirectories: false)
+        defer { try? fm.removeItem(at: staging) }
+        for (index, url) in urls.enumerated() {
+            try fm.copyItem(at: url, to: staging.appendingPathComponent(String(index)))
+        }
+        for (index, url) in urls.enumerated() {
+            let filename = url.lastPathComponent
+            var dest = directory.appendingPathComponent(filename)
+            var number = 2
+            while fm.fileExists(atPath: dest.path) {
+                let base = (filename as NSString).deletingPathExtension
+                let ext = (filename as NSString).pathExtension
+                dest = directory.appendingPathComponent(base + " " + String(number) + (ext.isEmpty ? "" : "." + ext))
+                number += 1
+            }
+            try fm.moveItem(at: staging.appendingPathComponent(String(index)), to: dest)
+        }
+    }
+
+    private func export(entry: ClipboardEntry, contents: [ClipboardContent]) async throws {
+        guard let content = contents.first else { throw CocoaError(.fileReadCorruptFile) }
+        if contents.count > 1 {
             let chooser = NSOpenPanel()
-            chooser.title = "Save Copied Files"
+            chooser.title = "Save Copied Items"
             chooser.prompt = "Save Here"
             chooser.canChooseDirectories = true
             chooser.canChooseFiles = false
             chooser.canCreateDirectories = true
             guard await chooser.begin() == .OK, let directory = chooser.url else { return }
             try await Task.detached(priority: .userInitiated) {
-                let fm = FileManager.default
-                for url in urls { try Self.checkCopyDestination(source: url, destination: directory) }
-                let staging = directory.appendingPathComponent(".shad-export-" + UUID().uuidString, isDirectory: true)
-                try fm.createDirectory(at: staging, withIntermediateDirectories: false)
-                defer { try? fm.removeItem(at: staging) }
-                for (index, url) in urls.enumerated() {
-                    try fm.copyItem(at: url, to: staging.appendingPathComponent(String(index)))
-                }
-                for (index, url) in urls.enumerated() {
-                    let filename = url.lastPathComponent
-                    var dest = directory.appendingPathComponent(filename)
-                    var number = 2
-                    while fm.fileExists(atPath: dest.path) {
-                        let base = (filename as NSString).deletingPathExtension
-                        let ext = (filename as NSString).pathExtension
-                        dest = directory.appendingPathComponent(base + " " + String(number) + (ext.isEmpty ? "" : "." + ext))
-                        number += 1
-                    }
-                    try fm.moveItem(at: staging.appendingPathComponent(String(index)), to: dest)
-                }
+                let urls = try Self.fileURLs(for: entry, contents: contents, action: .save)
+                try Self.exportGroup(urls, into: directory)
             }.value
             return
         }
         let chooser = NSSavePanel()
-        chooser.nameFieldStringValue = Self.filename(for: entry, content: content)
+        chooser.nameFieldStringValue = Self.filename(title: entry.title, content: content)
         if case .image = content { chooser.allowedContentTypes = [.png] }
         if case .text = content { chooser.allowedContentTypes = [.plainText] }
         chooser.canCreateDirectories = true
