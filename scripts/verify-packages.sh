@@ -3,7 +3,7 @@
 set -euo pipefail
 export LC_ALL=C
 cd "$(dirname "$0")/.."
-version=${VERSION:-0.4.0}
+version=${VERSION:-0.5.0}
 case "$version" in ''|*[!0-9.]*) echo 'VERSION must contain digits and dots' >&2; exit 2;; esac
 output=$(cd "${1:-dist}" && pwd)
 work=$(mktemp -d "${TMPDIR:-/tmp}/shad-verify.XXXXXX")

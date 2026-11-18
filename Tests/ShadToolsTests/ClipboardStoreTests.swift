@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SQLite3
 import Testing
 @testable import ShadTools
 
@@ -104,5 +105,120 @@ struct ClipboardStoreTests {
         #expect(try !suite.record(reversed, observing: "boot:board:2", at: second.addingTimeInterval(2)))
         #expect(try standalone.entries().isEmpty)
         #expect(try suite.record(reversed, observing: "boot:board:3", at: second.addingTimeInterval(3)))
+    }
+
+    @Test func keepsOriginalFormatsCopyTimesAndSourceAcrossEditions() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let a = ClipboardStore(directory: dir), b = ClipboardStore(directory: dir)
+        let first = Date(timeIntervalSince1970: 42), last = first.addingTimeInterval(3)
+        let plain = ClipboardRepresentation(type: "public.utf8-plain-text", data: Data("Hi".utf8))
+        let rich = ClipboardRepresentation(type: "public.html", data: Data("<b>Hi</b>".utf8))
+        let original = ClipboardCapture(content: .text("Hi"), items: [[plain, rich]], sourceBundleID: "sample.one", sourceName: "One")
+        var later = original
+        later.sourceName = "Two"; later.sourceBundleID = "sample.two"
+        #expect(try a.record(original, observing: "g1", at: first))
+        let saved = try #require(try b.entries().first)
+        try b.rename(saved.id, to: "Welcome")
+        try b.setPinned(saved.id, true)
+        #expect(try !b.record(original, observing: "g1", at: last))
+        #expect(try a.record(later, observing: "g3", at: last))
+        #expect(try b.record(original, observing: "g2", at: first.addingTimeInterval(1)))
+        let entry = try #require(try b.entries().first)
+        #expect(entry.firstCopiedAt == first && entry.copiedAt == last && entry.copyCount == 3)
+        #expect(entry.title == "Welcome" && entry.isPinned && entry.id == saved.id)
+        #expect(entry.sourceName == "Two" && entry.sourceBundleID == "sample.two")
+        #expect(entry.formatTypes == [plain.type, rich.type])
+        #expect(try a.capture(for: entry.id) == later)
+        var different = later
+        different.items[0][1] = ClipboardRepresentation(type: rich.type, data: Data("<i>Hi</i>".utf8))
+        #expect(try b.record(different, observing: "g4", at: last.addingTimeInterval(1)))
+        #expect(try a.entries().count == 2)
+    }
+
+    @Test func editsReclassifyPreserveIdentityAndLeaveIndependentSnippets() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = ClipboardStore(directory: dir)
+        try store.record(.text("https://example.org"))
+        let url = try #require(try store.entries().first)
+        #expect(url.kind == .link)
+        try store.saveSnippet(url.id, named: "Project address")
+        try store.edit(url.id, text: "#abcdef")
+        #expect(try store.entries().first?.kind == .color)
+        try store.record(.text("https://example.org"))
+        try store.edit(url.id, text: "hello@example.org")
+        #expect(try store.entries().map(\.kind) == [.link, .email])
+        try store.rename(url.id, to: "Contact")
+        #expect(try store.entries(matching: "example.org").count == 2)
+        #expect(try store.entries(matching: "Contact").first?.id == url.id)
+        try store.clear()
+        #expect(try store.entries().isEmpty)
+        let snippet = try #require(try store.snippets(matching: "Project").first)
+        #expect(snippet.isSnippet && snippet.title == "Project address")
+        #expect(try store.capture(for: snippet.id)?.content == .text("https://example.org"))
+        try store.rename(snippet.id, to: "Template")
+        try store.edit(snippet.id, text: "Many thanks")
+        #expect(try store.snippets(matching: "THANKS").first?.title == "Template")
+        try store.remove(snippet.id)
+        #expect(try store.snippets().isEmpty)
+    }
+
+    @Test func retainsFileGroupsPinnedItemsAndSearchableRecognition() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = ClipboardStore(directory: dir, maxEntries: 3)
+        let urls = ["One.png", "Two.pdf"].map { dir.appendingPathComponent($0) }
+        let files = ClipboardCapture(content: .files(urls), items: urls.map {
+            [ClipboardRepresentation(type: "public.file-url", data: Data($0.absoluteString.utf8))]
+        }, sourceName: "Finder")
+        let date = Date(timeIntervalSince1970: 100)
+        try store.record(files, observing: "files", at: date)
+        let group = try #require(try store.entries(matching: "Two.pdf").first)
+        #expect(group.kind == .files && group.itemCount == 2)
+        #expect(try store.capture(for: group.id) == files)
+        try store.setPinned(group.id, true)
+        for value in 1...5 { try store.record(.text(String(value)), at: date.addingTimeInterval(Double(value))) }
+        #expect(try store.entries().map(\.title) == [group.title, "5", "4"])
+        try store.clear(since: date.addingTimeInterval(5))
+        #expect(try store.entries().map(\.title) == [group.title, "4"])
+        try store.clear(since: date)
+        #expect(try store.entries().map(\.id) == [group.id])
+        let bitmap = try #require(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 6, pixelsHigh: 4,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+            bytesPerRow: 0, bitsPerPixel: 0))
+        let bytes = try #require(bitmap.representation(using: .png, properties: [:]))
+        try store.record(.image(bytes))
+        let image = try #require(try store.entries().first(where: { $0.kind == .image }))
+        #expect(image.pixelWidth == 6 && image.pixelHeight == 4)
+        try store.setRecognizedText("Three little birds", for: image.id)
+        #expect(try store.entries(matching: "LITTLE BIRDS").map(\.id) == [image.id])
+        try store.clear(since: date, includingPinned: true)
+        #expect(try store.entries().isEmpty)
+    }
+
+    @Test func migratesExistingHistoryInPlaceWithoutInventingSource() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var legacy: OpaquePointer?
+        #expect(sqlite3_open(dir.appendingPathComponent("history.sqlite3").path, &legacy) == SQLITE_OK)
+        let legacyDB = try #require(legacy)
+        let schema = """
+            CREATE TABLE entries (id TEXT NOT NULL UNIQUE,kind TEXT NOT NULL,title TEXT NOT NULL,copied REAL NOT NULL,
+                bytes INTEGER NOT NULL,thumbnail BLOB,payload BLOB NOT NULL);
+            CREATE TABLE settings(name TEXT PRIMARY KEY);
+            CREATE TABLE observations(token TEXT NOT NULL UNIQUE);
+            INSERT INTO settings VALUES('paused');
+            INSERT INTO entries VALUES('old','text','#f00',42,4,NULL,CAST('#f00' AS BLOB));
+            """
+        #expect(sqlite3_exec(legacyDB, schema, nil, nil, nil) == SQLITE_OK)
+        sqlite3_close(legacyDB)
+        let store = ClipboardStore(directory: dir)
+        let row = try #require(try store.entries().first)
+        #expect(row.id == "old" && row.kind == .color && row.firstCopiedAt == row.copiedAt && row.copyCount == 1)
+        #expect(row.sourceName == nil && row.sourceBundleID == nil && row.formatTypes == ["public.utf8-plain-text"])
+        #expect(try store.content(for: row.id) == .text("#f00"))
+        #expect(try store.isPaused())
     }
 }

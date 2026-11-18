@@ -4,35 +4,63 @@ import Combine
 import ImageIO
 import SwiftUI
 
-private enum HistoryFilter: String, CaseIterable {
+enum HistoryFilter: String, CaseIterable {
     case all = "All Types"
     case text = "Text"
     case images = "Images"
+    case files = "Files"
+    case links = "Links"
+    case emails = "Emails"
+    case colors = "Colors"
+    case pinned = "Pinned"
+    case snippets = "Snippets"
 
     func includes(_ entry: ClipboardEntry) -> Bool {
-        self == .all || (self == .text && entry.kind == .text) || (self == .images && entry.kind == .image)
+        switch self {
+        case .all: return !entry.isSnippet
+        case .text: return entry.kind == .text && !entry.isSnippet
+        case .images: return entry.kind == .image && !entry.isSnippet
+        case .files: return entry.kind == .files && !entry.isSnippet
+        case .links: return entry.kind == .link && !entry.isSnippet
+        case .emails: return entry.kind == .email && !entry.isSnippet
+        case .colors: return entry.kind == .color && !entry.isSnippet
+        case .pinned: return entry.isPinned && !entry.isSnippet
+        case .snippets: return entry.isSnippet
+        }
     }
 }
 
-private enum HistoryPreview {
+enum HistoryPreview {
     case loading
     case text(String)
     case image(CGImage)
+    case files([URL])
     case unavailable
 }
 
 @MainActor
-private final class HistoryBrowser: ObservableObject {
+final class HistoryBrowser: ObservableObject {
     weak var tool: ClipboardTool?
-    @Published var query = "" { didSet { if oldValue != query { updateResults() } } }
-    @Published var filter: HistoryFilter = .all { didSet { if oldValue != filter { updateResults() } } }
+    @Published var query = "" { didSet { if oldValue != query { updateResults(invalidateSelection: true) } } }
+    @Published var filter: HistoryFilter = .all { didSet { if oldValue != filter { updateResults(invalidateSelection: true) } } }
     @Published private(set) var rows: [ClipboardEntry] = []
     @Published private(set) var selectedID: String?
     @Published private(set) var preview: HistoryPreview = .loading
     @Published private(set) var total = 0
     @Published private(set) var paused = false
     @Published private(set) var issue: String?
-    @Published var confirmingClear = false
+    @Published var menu: ClipboardMenu?
+    @Published var actionQuery = "" { didSet { if oldValue != actionQuery { actionIndex = 0 } } }
+    @Published var actionIndex = 0
+    @Published var editor: ClipboardEditor?
+    @Published var draft = ""
+    @Published var deletion: ClipboardDeletion?
+    @Published var inspection = ClipboardInspection()
+    @Published var formats: [String] = []
+    private(set) var content: ClipboardContent?
+    weak var hostPanel: NSPanel?
+    var focusActions: (() -> Void)?
+    var isOverlayOpen: Bool { menu != nil || editor != nil || deletion != nil }
     var focusSearch: (() -> Void)?
 
     private var presented = false
@@ -40,6 +68,7 @@ private final class HistoryBrowser: ObservableObject {
     private var previewTask: Task<Void, Never>?
     private var subscriptions: Set<AnyCancellable> = []
     private var all: [ClipboardEntry] = []
+    private var snippets: [ClipboardEntry] = []
     private let thumbnails = NSCache<NSString, NSImage>()
 
     init(tool: ClipboardTool) {
@@ -48,8 +77,13 @@ private final class HistoryBrowser: ObservableObject {
         tool.$entries.sink { [weak self] entries in
             guard let self else { return }
             all = entries
-            total = entries.count
+            total = entries.filter { !$0.isSnippet }.count
             if presented { updateResults() }
+        }.store(in: &subscriptions)
+        tool.$snippets.sink { [weak self] snippets in
+            guard let self else { return }
+            self.snippets = snippets
+            if presented && filter == .snippets { updateResults() }
         }.store(in: &subscriptions)
         tool.$paused.sink { [weak self] in self?.paused = $0 }.store(in: &subscriptions)
         tool.$issue.sink { [weak self] in self?.issue = $0 }.store(in: &subscriptions)
@@ -68,25 +102,31 @@ private final class HistoryBrowser: ObservableObject {
         presented = false
         searchTask?.cancel()
         previewTask?.cancel()
-        confirmingClear = false
+        resetOverlays()
         selectedID = nil
+        content = nil
+        inspection = ClipboardInspection()
+        formats = []
         preview = .loading
         rows = []
         thumbnails.removeAllObjects()
     }
 
-    private func updateResults() {
+    private func updateResults(invalidateSelection: Bool = false) {
         guard presented else { return }
         searchTask?.cancel()
         let query = self.query.trimmingCharacters(in: .whitespacesAndNewlines)
-        if query.isEmpty { apply(all); return }
-        // While searching, a previous selection must not be pasted by a quick Return.
-        rows = []
-        select(nil)
+        if query.isEmpty { apply(filter == .snippets ? snippets : all); return }
+        // A new query invalidates the old selection immediately. A background
+        // refresh of the same query should preserve an open action or edit form.
+        if invalidateSelection {
+            rows = []
+            select(nil)
+        }
         searchTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 65_000_000)
             guard !Task.isCancelled, let self, let tool else { return }
-            let matches = await tool.entries(matching: query)
+            let matches = filter == .snippets ? await tool.snippets(matching: query) : await tool.entries(matching: query)
             guard !Task.isCancelled, presented else { return }
             apply(matches)
         }
@@ -94,8 +134,12 @@ private final class HistoryBrowser: ObservableObject {
 
     private func apply(_ entries: [ClipboardEntry]) {
         let previousIndex = rows.firstIndex(where: { $0.id == selectedID }) ?? 0
+        let original = selected
         rows = entries.filter(filter.includes)
-        if rows.contains(where: { $0.id == selectedID }) { return }
+        if let current = selected {
+            if current != original { loadPreview(current) }
+            return
+        }
         let next = rows.isEmpty ? nil : rows[min(previousIndex, rows.count - 1)].id
         select(next)
     }
@@ -109,31 +153,42 @@ private final class HistoryBrowser: ObservableObject {
     func select(_ id: String?) {
         guard selectedID != id else { return }
         selectedID = id
+        resetOverlays()
+        loadPreview(selected)
+    }
+
+    private func loadPreview(_ entry: ClipboardEntry?) {
         previewTask?.cancel()
         preview = .loading
-        guard let entry = selected, let tool else { return }
+        content = nil
+        inspection = ClipboardInspection()
+        formats = []
+        guard let entry, let tool else { return }
         previewTask = Task { [weak self, weak tool] in
-            guard let content = await tool?.content(for: entry), !Task.isCancelled else {
+            guard let tool else { return }
+            guard let content = await tool.content(for: entry) else {
                 if !Task.isCancelled { self?.preview = .unavailable }
                 return
             }
-            let next: HistoryPreview
-            switch content {
-            case .text(let text): next = .text(text)
-            case .image(let data):
-                // Display a bounded preview, while copying and pasting use the full PNG.
-                let image = await Task.detached(priority: .userInitiated) { () -> CGImage? in
-                    guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
-                    let options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
-                        kCGImageSourceCreateThumbnailWithTransform: true,
-                        kCGImageSourceThumbnailMaxPixelSize: 1500, kCGImageSourceShouldCacheImmediately: true]
-                    return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
-                }.value
-                next = image.map(HistoryPreview.image) ?? .unavailable
-            }
+            guard !Task.isCancelled else { return }
+            let inspectionTask = Task.detached(priority: .userInitiated) { ClipboardInspection.inspect(content) }
+            let result = await withTaskCancellationHandler {
+                await inspectionTask.value
+            } onCancel: { inspectionTask.cancel() }
             guard !Task.isCancelled, self?.selectedID == entry.id else { return }
-            self?.preview = next
+            self?.content = content
+            self?.inspection = result
+            self?.preview = result.preview
+            let available = await tool.formats(for: entry)
+            guard !Task.isCancelled, self?.selectedID == entry.id else { return }
+            self?.formats = available
         }
+    }
+
+    var countLabel: String {
+        if filter == .snippets { return rows.count == 1 ? "1 snippet" : "\(rows.count) snippets" }
+        if filter != .all || !query.isEmpty { return "\(rows.count) of \(total) items" }
+        return total == 1 ? "1 item" : "\(total) items"
     }
 
     func thumbnail(for entry: ClipboardEntry) -> NSImage? {
@@ -147,7 +202,7 @@ private final class HistoryBrowser: ObservableObject {
     func paste() { if let selected { tool?.paste(selected) } }
     func copy() { if let selected { tool?.copy(selected) } }
     func remove() { if let selected { tool?.remove(selected) } }
-    func clear() { confirmingClear = false; tool?.clear() }
+
 }
 
 private final class ClipboardPanel: NSPanel {
@@ -159,12 +214,14 @@ final class ClipboardHistoryWindow: NSObject, NSWindowDelegate {
     private let panel: NSPanel
     private let browser: HistoryBrowser
     private var monitor: Any?
+    private var suspendedForPaste = false
 
     init(tool: ClipboardTool) {
         browser = HistoryBrowser(tool: tool)
-        panel = ClipboardPanel(contentRect: NSRect(x: 0, y: 0, width: 824, height: 522),
+        panel = ClipboardPanel(contentRect: NSRect(x: 0, y: 0, width: 850, height: 555),
                                styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
         super.init()
+        browser.hostPanel = panel
         panel.title = "Clipboard History"
         panel.setAccessibilityLabel("Clipboard History")
         panel.isFloatingPanel = true
@@ -182,10 +239,11 @@ final class ClipboardHistoryWindow: NSObject, NSWindowDelegate {
     func toggle() { panel.isVisible && panel.isKeyWindow ? hide() : show() }
 
     func show() {
+        suspendedForPaste = false
         browser.appear()
         if let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main {
             let frame = screen.visibleFrame
-            let size = NSSize(width: min(824, frame.width - 24), height: min(522, frame.height - 28))
+            let size = NSSize(width: min(850, frame.width - 24), height: min(555, frame.height - 28))
             panel.setFrame(NSRect(x: frame.midX - size.width / 2, y: frame.minY + (frame.height - size.height) * 0.62,
                                   width: size.width, height: size.height), display: true)
         }
@@ -204,36 +262,78 @@ final class ClipboardHistoryWindow: NSObject, NSWindowDelegate {
         }
     }
 
+    func suspendForPaste() {
+        suspendedForPaste = true
+        panel.orderOut(nil)
+    }
+
+    func resumeAfterPaste() {
+        guard suspendedForPaste else { return }
+        suspendedForPaste = false
+        panel.makeKeyAndOrderFront(nil)
+        panel.orderFrontRegardless()
+        browser.focusSearch?()
+    }
+
     func hide() {
+        suspendedForPaste = false
         if let monitor { NSEvent.removeMonitor(monitor); self.monitor = nil }
         if panel.isVisible { panel.orderOut(nil) }
         browser.disappear()
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        if panel.isVisible { hide() }
+        if panel.isVisible && !suspendedForPaste && panel.attachedSheet == nil && NSApp.modalWindow == nil { hide() }
     }
 
     private func handle(_ event: NSEvent) -> Bool {
         guard panel.isKeyWindow, event.window == panel else { return false }
         if (panel.firstResponder as? NSTextView)?.hasMarkedText() == true { return false }
         let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
-        if browser.confirmingClear {
-            if event.keyCode == 53 { browser.confirmingClear = false; browser.focusSearch?(); return true }
-            // Destructive clearance always requires the explicit Clear History button.
-            return [36, 76].contains(event.keyCode)
+        let key = event.charactersIgnoringModifiers?.lowercased()
+        let enter = event.keyCode == 36 || event.keyCode == 76
+        if browser.editor != nil {
+            if event.keyCode == 53 { browser.cancelOverlay(); return true }
+            if enter && (modifiers == .command || (browser.editor?.multiline == false && modifiers.isEmpty)) {
+                browser.saveDraft(); return true
+            }
+            return performEditingShortcut(event)
         }
+        if browser.deletion != nil {
+            if event.keyCode == 53 { browser.cancelOverlay(); return true }
+            return enter
+        }
+        if browser.menu != nil {
+            if event.keyCode == 53 { browser.backMenu(); return true }
+            if modifiers == .command && key == "k" { browser.closeMenu(); return true }
+            if modifiers.isEmpty {
+                switch event.keyCode {
+                case 125: browser.moveAction(1); return true
+                case 126: browser.moveAction(-1); return true
+                case 36, 76: browser.runSelectedAction(); return true
+                default: break
+                }
+            }
+            return performEditingShortcut(event)
+        }
+        if modifiers == [.command, .shift], key == "x" { browser.openMenu(.recent); return true }
+        if modifiers == .option, enter { browser.pasteKeepingOpen(); return true }
         if modifiers == .command {
-            switch event.keyCode {
-            case 36, 76: browser.copy()
-            case 51: browser.remove()
-            default:
-                guard let key = event.charactersIgnoringModifiers?.lowercased() else { return false }
-                if key == "f" { browser.focusSearch?() }
-                else if key == "w" { hide() }
-                else if let selector = ["a": "selectAll:", "c": "copy:", "x": "cut:", "v": "paste:"][key] {
-                    return NSApp.sendAction(NSSelectorFromString(selector), to: panel.firstResponder, from: self)
-                } else { return false }
+            if enter { browser.copy(); return true }
+            if event.keyCode == 51 { browser.remove(); return true }
+            switch key {
+            case "k": browser.openMenu(.actions)
+            case "p": browser.openMenu(.filters)
+            case ".": browser.togglePin()
+            case "e": browser.beginEdit(.rename)
+            case "f": browser.focusSearch?()
+            case "w": hide()
+            case "x":
+                if let field = panel.firstResponder as? NSTextView, field.selectedRange().length > 0 {
+                    return performEditingShortcut(event)
+                }
+                browser.remove()
+            default: return performEditingShortcut(event)
             }
             return true
         }
@@ -247,9 +347,17 @@ final class ClipboardHistoryWindow: NSObject, NSWindowDelegate {
         }
         return true
     }
+
+    private func performEditingShortcut(_ event: NSEvent) -> Bool {
+        guard event.modifierFlags.intersection([.command, .option, .control, .shift]) == .command,
+              let key = event.charactersIgnoringModifiers?.lowercased(),
+              let selector = ["a": "selectAll:", "c": "copy:", "x": "cut:", "v": "paste:", "z": "undo:"][key]
+        else { return false }
+        return NSApp.sendAction(NSSelectorFromString(selector), to: panel.firstResponder, from: self)
+    }
 }
 
-private final class HistoryTextField: NSTextField {
+final class HistoryTextField: NSTextField {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         guard let window else { return }
@@ -294,10 +402,10 @@ private struct HistorySearchField: NSViewRepresentable {
     }
 }
 
-private struct ClipboardTextPreview: NSViewRepresentable {
+struct ClipboardTextPreview: NSViewRepresentable {
     let id: String
     let text: String
-    final class Coordinator { var id: String? }
+    final class Coordinator { var id: String?; var text: String? }
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSTextView.scrollableTextView()
@@ -319,8 +427,9 @@ private struct ClipboardTextPreview: NSViewRepresentable {
         return scroll
     }
     func updateNSView(_ scroll: NSScrollView, context: Context) {
-        guard context.coordinator.id != id, let view = scroll.documentView as? NSTextView else { return }
+        guard context.coordinator.id != id || context.coordinator.text != text, let view = scroll.documentView as? NSTextView else { return }
         context.coordinator.id = id
+        context.coordinator.text = text
         view.string = text
         view.scrollRangeToVisible(NSRange(location: 0, length: 0))
     }
@@ -332,7 +441,7 @@ private struct HistoryView: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceTransparency) private var solid
     private let corner = RoundedRectangle(cornerRadius: 24, style: .continuous)
-    private var surface: Color { scheme == .dark ? Color(white: 0.235) : Color(white: 0.969) }
+    private var surface: Color { scheme == .dark ? Color(white: 0.117) : Color(white: 0.969) }
     private var secondary: Color { scheme == .dark ? Color(white: 0.74) : Color(white: 0.36) }
     private var selection: Color { scheme == .dark ? .white.opacity(0.105) : .black.opacity(0.075) }
 
@@ -360,7 +469,7 @@ private struct HistoryView: View {
                 else {
                     GeometryReader { box in
                         HStack(spacing: 0) {
-                            historyList.frame(width: (box.size.width * 0.45).rounded())
+                            historyList.frame(width: (box.size.width * 0.375).rounded())
                             Divider()
                             detail.frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
@@ -369,8 +478,9 @@ private struct HistoryView: View {
                 Divider()
                 footer
             }
-            .accessibilityHidden(browser.confirmingClear)
-            if browser.confirmingClear { confirmation }
+            .accessibilityHidden(browser.isOverlayOpen)
+            if browser.menu != nil { ClipboardActionPalette(browser: browser) }
+            if browser.editor != nil || browser.deletion != nil { ClipboardEditorOverlay(browser: browser) }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background { surface.opacity(solid ? 1 : 0.95).background(.regularMaterial) }
@@ -387,7 +497,7 @@ private struct HistoryView: View {
             Text(filtered ? "No matching items" : browser.paused ? "Clipboard history is paused" : "Your clipboard history is empty")
                 .font(.system(size: 16, weight: .semibold))
             if !filtered {
-                Text(browser.paused ? "Resume history to collect new copies." : "Copy text or an image to see it here.")
+                Text(browser.paused ? "Resume history to collect new copies." : "Copy text, images or files to see them here.")
                     .font(.system(size: 13)).foregroundStyle(secondary)
                 if browser.paused { Button("Resume History") { browser.tool?.setPaused(false) } }
             }
@@ -400,8 +510,8 @@ private struct HistoryView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
                     ForEach(Array(browser.rows.enumerated()), id: \.element.id) { index, entry in
-                        if index == 0 || !Calendar.current.isDate(browser.rows[index-1].copiedAt, inSameDayAs: entry.copiedAt) {
-                            Text(sectionTitle(entry.copiedAt)).font(.system(size: 12, weight: .semibold))
+                        if index == 0 || sectionTitle(browser.rows[index-1]) != sectionTitle(entry) {
+                            Text(sectionTitle(entry)).font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(secondary).padding(.horizontal, 10).frame(height: 27)
                                 .accessibilityAddTraits(.isHeader)
                         }
@@ -413,7 +523,10 @@ private struct HistoryView: View {
         }
     }
 
-    private func sectionTitle(_ date: Date) -> String {
+    private func sectionTitle(_ entry: ClipboardEntry) -> String {
+        if entry.isSnippet { return "Snippets" }
+        if entry.isPinned { return "Pinned" }
+        let date = entry.copiedAt
         if Calendar.current.isDateInToday(date) { return "Today" }
         if Calendar.current.isDateInYesterday(date) { return "Yesterday" }
         return date.formatted(date: .abbreviated, time: .omitted)
@@ -427,57 +540,37 @@ private struct HistoryView: View {
                     Image(nsImage: thumb).resizable().scaledToFill().frame(width: 30, height: 30)
                         .clipShape(RoundedRectangle(cornerRadius: 6)).accessibilityHidden(true)
                 } else {
-                    Image(systemName: entry.kind == .image ? "photo" : "text.alignleft").font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(entry.kind == .image ? Color.mint : secondary)
-                        .frame(width: 30, height: 30)
+                    Image(systemName: entry.kind.historySymbol).font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(entry.kind.historyTint)
+                        .frame(width: 28, height: 28)
                         .background(.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 6))
                         .accessibilityHidden(true)
                 }
-                Text(entry.title).font(.system(size: 14, weight: .medium)).lineLimit(1).truncationMode(.tail)
+                Text(entry.historyTitle).font(.system(size: 14, weight: .medium)).lineLimit(1).truncationMode(.tail)
                 Spacer(minLength: 4)
+                if entry.isPinned { Image(systemName: "pin.fill").font(.caption2).foregroundStyle(secondary).accessibilityLabel("Pinned") }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 8).frame(height: 42)
                 .background(selected ? selection : .clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .simultaneousGesture(TapGesture(count: 2).onEnded { browser.select(entry.id); browser.paste() })
-        .accessibilityLabel(entry.title).accessibilityValue(entry.kind == .image ? "Image" : "Text")
+        .accessibilityLabel(entry.historyTitle).accessibilityValue(entry.kind.historyLabel)
         .accessibilityAddTraits(selected ? .isSelected : [])
         .contextMenu {
-            Button("Paste into Previous App") { browser.select(entry.id); browser.paste() }
-            Button("Copy to Clipboard") { browser.select(entry.id); browser.copy() }
+            Button("Actions…") { browser.select(entry.id); browser.openMenu(.actions) }
+            Button(browser.pasteTitle) { browser.tool?.paste(entry) }
+            Button("Copy to Clipboard") { browser.tool?.copy(entry) }
             Divider()
-            Button("Delete Item", role: .destructive) { browser.tool?.remove(entry) }
+            if !entry.isSnippet { Button(entry.isPinned ? "Unpin Entry" : "Pin Entry") { browser.tool?.setPinned(!entry.isPinned, for: entry) } }
+            Button("Rename Entry…") { browser.select(entry.id); browser.beginEdit(.rename) }
+            Button("Delete Entry", role: .destructive) { browser.tool?.remove(entry) }
         }
     }
 
     @ViewBuilder private var detail: some View {
         if let entry = browser.selected {
-            VStack(alignment: .leading, spacing: 0) {
-                Group {
-                    switch browser.preview {
-                    case .loading: ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
-                    case .unavailable:
-                        Text("Preview unavailable").font(.callout).foregroundStyle(secondary)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    case .text(let text): ClipboardTextPreview(id: entry.id, text: text)
-                    case .image(let image):
-                        Image(decorative: image, scale: 1).resizable().aspectRatio(contentMode: .fit)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .accessibilityElement().accessibilityLabel("Image preview")
-                    }
-                }.padding(20).frame(maxWidth: .infinity, maxHeight: .infinity)
-                Divider().padding(.horizontal, 18)
-                HStack(spacing: 8) {
-                    Label(entry.kind == .text ? "Text" : "Image", systemImage: entry.kind == .text ? "text.alignleft" : "photo")
-                    Text("·").accessibilityHidden(true)
-                    Text(ByteCountFormatter.string(fromByteCount: Int64(entry.byteCount), countStyle: .file))
-                    Spacer(minLength: 4)
-                    Text(entry.copiedAt, format: .dateTime.month(.abbreviated).day().hour().minute())
-                }.font(.system(size: 11.5)).foregroundStyle(secondary)
-                    .padding(.horizontal, 19).frame(height: 40)
-            }
-            .background(.primary.opacity(0.016))
+            ClipboardInspector(browser: browser, entry: entry)
         }
     }
 
@@ -493,22 +586,23 @@ private struct HistoryView: View {
                 }
                 Divider()
                 Button("Delete Selected Item") { browser.remove() }.disabled(browser.selected == nil)
-                Button("Clear History…", role: .destructive) { browser.confirmingClear = true }.disabled(browser.total == 0)
+                Button("Delete Recent Entries…") { browser.openMenu(.recent) }
+                Button("Delete All Entries…", role: .destructive) { browser.deletion = .all }.disabled(browser.total == 0)
             } label: {
                 Image(systemName: "ellipsis.circle").font(.system(size: 18))
             }
             .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
             .accessibilityLabel("History actions").help("History actions")
-            Text(browser.paused ? "History paused" : browser.total == 1 ? "1 item" : "\(browser.total) items")
+            Text(browser.paused ? "History paused" : browser.countLabel)
                 .font(.system(size: 12)).foregroundStyle(secondary)
             Spacer(minLength: 8)
-            Button { browser.copy() } label: {
-                HStack(spacing: 6) { Text("Copy"); key("⌘↵") }
-            }.accessibilityLabel("Copy to clipboard").disabled(browser.selected == nil)
-            Divider().frame(height: 16)
             Button { browser.paste() } label: {
-                HStack(spacing: 6) { Text("Paste").fontWeight(.semibold); key("↵") }
-            }.accessibilityLabel("Paste into previous app").disabled(browser.selected == nil)
+                HStack(spacing: 6) { Text(browser.pasteTitle).fontWeight(.semibold); key("↵") }
+            }.accessibilityLabel(browser.pasteTitle).disabled(browser.selected == nil)
+            Divider().frame(height: 16)
+            Button { browser.openMenu(.actions) } label: {
+                HStack(spacing: 6) { Text("Actions"); key("⌘K") }
+            }.accessibilityLabel("Actions").help("Actions (⌘K)").disabled(browser.selected == nil)
         }
         .buttonStyle(.plain).font(.system(size: 13)).padding(.horizontal, 18).frame(height: 49)
 
@@ -522,20 +616,4 @@ private struct HistoryView: View {
             .accessibilityHidden(true)
     }
 
-    private var confirmation: some View {
-        ZStack {
-            Color.black.opacity(0.20).contentShape(Rectangle()).onTapGesture { browser.confirmingClear = false }
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Clear clipboard history?").font(.headline)
-                Text("This deletes all saved text and images from Shad’s history.").font(.callout).foregroundStyle(secondary)
-                HStack {
-                    Spacer()
-                    Button("Cancel") { browser.confirmingClear = false; browser.focusSearch?() }
-                    Button("Clear History", role: .destructive) { browser.clear(); browser.focusSearch?() }
-                }.padding(.top, 5)
-            }.padding(20).frame(width: 325).background(.thickMaterial, in: RoundedRectangle(cornerRadius: 15))
-                .overlay(RoundedRectangle(cornerRadius: 15).strokeBorder(.primary.opacity(0.18), lineWidth: 0.7))
-                .shadow(color: .black.opacity(0.2), radius: 14, y: 4)
-        }
-    }
 }

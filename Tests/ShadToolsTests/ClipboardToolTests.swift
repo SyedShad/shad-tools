@@ -87,6 +87,106 @@ struct ClipboardToolTests {
         #expect(ClipboardPasteboard.read(board, expectedChange: board.changeCount - 1, frontmostBundleID: nil).isEmpty)
     }
 
+    @Test @MainActor func richTextRestoresOriginalFormatsAndAnExplicitPlainSelection() async throws {
+        let board = NSPasteboard.withUniqueName()
+        defer { board.releaseGlobally() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ClipboardStore(directory: directory)
+        let tool = ClipboardTool(store: store, pasteboard: board, monitor: false)
+        let item = NSPasteboardItem()
+        let html = Data("<strong>Café</strong>".utf8)
+        item.setString("Café", forType: .string)
+        item.setData(html, forType: .html)
+        item.setString("com.apple.TextEdit", forType: .init("org.nspasteboard.source"))
+        board.clearContents()
+        #expect(board.writeObjects([item]))
+        await tool.poll(frontmostBundleID: "com.apple.finder")
+        let entry = try #require(try store.entries().first)
+        #expect(entry.sourceBundleID == "com.apple.TextEdit")
+        #expect(entry.sourceName?.isEmpty == false)
+        let capture = try #require(try store.capture(for: entry.id))
+        #expect(Set(ClipboardPasteboard.formats(capture)) == Set([NSPasteboard.PasteboardType.string.rawValue, NSPasteboard.PasteboardType.html.rawValue]))
+        #expect(ClipboardPasteboard.write(capture, to: board))
+        #expect(board.pasteboardItems?.first?.data(forType: .html) == html)
+        #expect(ClipboardPasteboard.write(capture, as: NSPasteboard.PasteboardType.string.rawValue, to: board))
+        #expect(board.string(forType: .string) == "Café")
+        #expect(board.pasteboardItems?.first?.types.contains(.html) == false)
+        #expect(ClipboardPasteboard.capture(board, expectedChange: board.changeCount, frontmostBundleID: nil) == nil)
+    }
+
+    @Test func capturesMultipleFinderFilesAsOneOrderedRestorableGroup() throws {
+        let board = NSPasteboard.withUniqueName()
+        defer { board.releaseGlobally() }
+        let files = ["one file.txt", "second.png"].map { URL(fileURLWithPath: "/tmp").appendingPathComponent($0) }
+        let items = files.map { url -> NSPasteboardItem in
+            let item = NSPasteboardItem()
+            item.setString(url.absoluteString, forType: .fileURL)
+            return item
+        }
+        #expect(board.writeObjects(items))
+        let capture = try #require(ClipboardPasteboard.capture(board, expectedChange: board.changeCount, frontmostBundleID: "com.apple.finder"))
+        #expect(capture.content == .files(files))
+        #expect(capture.items.count == 2)
+        #expect(ClipboardPasteboard.write(capture, to: board))
+        #expect(board.pasteboardItems?.compactMap { $0.string(forType: .fileURL) } == files.map(\.absoluteString))
+    }
+
+    @Test func preservesNativeColorAndItsAlphaValue() throws {
+        let board = NSPasteboard.withUniqueName()
+        defer { board.releaseGlobally() }
+        board.declareTypes([.color], owner: nil)
+        NSColor(srgbRed: 1, green: 0, blue: 0.5, alpha: 0.5).write(to: board)
+        let capture = try #require(ClipboardPasteboard.capture(board, expectedChange: board.changeCount, frontmostBundleID: nil))
+        #expect(capture.content == .text("#FF008080"))
+        #expect(capture.items.first?.contains { $0.type == NSPasteboard.PasteboardType.color.rawValue } == true)
+        #expect(ClipboardPasteboard.write(capture, to: board))
+        let restored = try #require(NSColor(from: board)?.usingColorSpace(.sRGB))
+        #expect(abs(restored.alphaComponent - 0.5) < 0.01)
+    }
+
+    @Test func previewMarkupSurvivesRevealAndQuickLookAndFoldersCannotCopyIntoThemselves() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entry = ClipboardEntry(id: "synthetic", kind: .image, title: "Screenshot", copiedAt: Date(), byteCount: 3)
+        let content = ClipboardContent.image(Data([1, 2, 3]))
+        let original = try ClipboardFileActions.materialize(entry: entry, content: content, action: .quickLook, root: root)
+        let annotated = try ClipboardFileActions.materialize(entry: entry, content: content, action: .annotate, root: root)
+        #expect(annotated != original)
+        try Data([4, 5]).write(to: annotated)
+        #expect(try ClipboardFileActions.materialize(entry: entry, content: content, action: .annotate, root: root) == annotated)
+        #expect(try ClipboardFileActions.materialize(entry: entry, content: content, action: .reveal, root: root) == annotated)
+        #expect(try Data(contentsOf: annotated) == Data([4, 5]))
+        #expect(try Data(contentsOf: original) == Data([1, 2, 3]))
+        #expect(throws: CocoaError.self) { try ClipboardFileActions.checkCopyDestination(source: root, destination: original) }
+    }
+
+    @Test func extractsQRAndRecognizesTextOnDevice() throws {
+        let payload = "Clipboard fixture 486"
+        let code = try #require(CIFilter(name: "CIQRCodeGenerator"))
+        code.setValue(Data(payload.utf8), forKey: "inputMessage")
+        let output = try #require(code.outputImage).transformed(by: CGAffineTransform(scaleX: 10, y: 10))
+        let padded = CIImage(color: .white).cropped(to: output.extent.insetBy(dx: -30, dy: -30))
+        let qrImage = output.composited(over: padded)
+        let cg = try #require(CIContext().createCGImage(qrImage, from: qrImage.extent))
+        let qr = try #require(NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:]))
+        #expect(try ClipboardImageRecognition.qrCodes(in: qr) == payload)
+
+        let size = CGRect(x: 0, y: 0, width: 800, height: 135)
+        let context = try #require(CGContext(data: nil, width: 800, height: 135, bitsPerComponent: 8, bytesPerRow: 3200,
+                                            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(size)
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: payload, attributes: [
+            .font: NSFont.systemFont(ofSize: 43), .foregroundColor: NSColor.black
+        ]))
+        context.textPosition = CGPoint(x: 25, y: 55)
+        CTLineDraw(line, context)
+        let textImage = try #require(context.makeImage())
+        let textPNG = try #require(NSBitmapImageRep(cgImage: textImage).representation(using: .png, properties: [:]))
+        #expect(try ClipboardImageRecognition.text(in: textPNG).contains(payload))
+    }
+
     @Test func normalizesCopiedImagesAndRestoresTheirPixels() throws {
         let board = NSPasteboard.withUniqueName()
         defer { board.releaseGlobally() }

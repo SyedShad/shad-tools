@@ -2,7 +2,7 @@
 # Build independent macOS app bundles and product archives using Apple tools.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-version=${VERSION:-0.4.0}
+version=${VERSION:-0.5.0}
 case "$version" in *[!0-9.]*|'') echo 'VERSION must be numeric with dots' >&2; exit 2;; esac
 work=$(mktemp -d "${TMPDIR:-/tmp}/shad-pack.XXXXXX")
 trap 'rm -rf "$work"' EXIT

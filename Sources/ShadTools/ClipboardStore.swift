@@ -4,24 +4,6 @@ import ImageIO
 import SQLite3
 import UniformTypeIdentifiers
 
-enum ClipboardContent: Equatable, Sendable {
-    case text(String)
-    case image(Data) // PNG, including alpha
-}
-
-enum ClipboardKind: String, Codable, Sendable {
-    case text, image
-}
-
-struct ClipboardEntry: Identifiable, Equatable, Sendable {
-    let id: String
-    let kind: ClipboardKind
-    let title: String
-    let copiedAt: Date
-    let byteCount: Int
-    var thumbnail: Data? = nil
-}
-
 private struct ClipboardStoreError: LocalizedError {
     let errorDescription: String?
     init(_ message: String) { errorDescription = message }
@@ -47,124 +29,292 @@ final class ClipboardStore: Sendable {
         self.maxItemBytes = maxItemBytes
     }
 
+    private let snippetPrefix = "snippet."
+
     func entries(matching query: String = "") throws -> [ClipboardEntry] {
-        // Only search text payloads. Image thumbnails and separate titles suffice for browsing.
-        let searchable = query.isEmpty ? "NULL" : "CASE WHEN kind='text' THEN payload END"
-        let sql = "SELECT id, kind, title, copied, bytes, thumbnail, " + searchable
-            + " FROM entries ORDER BY copied DESC, rowid DESC"
+        let searchable = query.isEmpty ? "NULL" : "CASE WHEN kind <> 'image' THEN payload END"
+        let sql = """
+            SELECT id,kind,coalesce(custom_title,title),copied,bytes,thumbnail,
+                   coalesce(first_copied,copied),copies,source_id,source_name,pinned,
+                   formats,item_count,ocr,width,height,\(searchable)
+            FROM entries ORDER BY pinned DESC, copied DESC, rowid DESC
+            """
         return try withDatabase { db in
             try statement(db, sql) { stmt in
-                var entries: [ClipboardEntry] = []
+                var result: [ClipboardEntry] = []
                 while try step(stmt) == SQLITE_ROW {
                     guard let kind = ClipboardKind(rawValue: string(stmt, 1)) else { continue }
                     let title = string(stmt, 2)
-                    if !query.isEmpty, !title.localizedCaseInsensitiveContains(query),
-                       !(kind == .text && string(stmt, 6).localizedCaseInsensitiveContains(query)) { continue }
-                    entries.append(ClipboardEntry(id: string(stmt, 0), kind: kind, title: title,
-                                                  copiedAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 3)),
-                                                  byteCount: Int(sqlite3_column_int64(stmt, 4)), thumbnail: data(stmt, 5)))
+                    let sourceName = optionalString(stmt, 9)
+                    let recognizedText = optionalString(stmt, 13)
+                    if !query.isEmpty {
+                        let body: String
+                        if kind == .files, let bytes = data(stmt, 16) {
+                            body = try fileURLs(bytes).map(\.path).joined(separator: "\n")
+                        } else { body = string(stmt, 16) }
+                        let fields = [title, sourceName ?? "", recognizedText ?? "", body]
+                        if !fields.contains(where: { $0.localizedCaseInsensitiveContains(query) }) { continue }
+                    }
+                    let formats = try data(stmt, 11).map { try PropertyListDecoder().decode([String].self, from: $0) }
+                    result.append(ClipboardEntry(id: string(stmt, 0), kind: kind, title: title,
+                        copiedAt: date(stmt, 3), byteCount: Int(sqlite3_column_int64(stmt, 4)), thumbnail: data(stmt, 5),
+                        firstCopiedAt: date(stmt, 6), copyCount: Int(sqlite3_column_int64(stmt, 7)),
+                        sourceBundleID: optionalString(stmt, 8), sourceName: sourceName,
+                        isPinned: sqlite3_column_int(stmt, 10) != 0, formatTypes: formats ?? defaultFormats(kind),
+                        itemCount: Int(sqlite3_column_int(stmt, 12)), recognizedText: recognizedText,
+                        pixelWidth: optionalInt(stmt, 14), pixelHeight: optionalInt(stmt, 15)))
                 }
-                return entries
+                return result
             }
+        }
+    }
+
+    private func defaultFormats(_ kind: ClipboardKind) -> [String] {
+        switch kind {
+        case .image: return ["public.png"]
+        case .files: return ["public.file-url"]
+        default: return ["public.utf8-plain-text"]
+        }
+    }
+
+    private func fileURLs(_ bytes: Data) throws -> [URL] {
+        try PropertyListDecoder().decode([String].self, from: bytes).map { URL(fileURLWithPath: $0) }
+    }
+
+    private func content(_ kind: ClipboardKind, _ bytes: Data) throws -> ClipboardContent {
+        switch kind {
+        case .image: return .image(bytes)
+        case .files: return .files(try fileURLs(bytes))
+        default: return .text(String(decoding: bytes, as: UTF8.self))
         }
     }
 
     func content(for id: String) throws -> ClipboardContent? {
         try withDatabase { db in
-            try statement(db, "SELECT kind, payload FROM entries WHERE id=?") { stmt in
+            if id.hasPrefix(snippetPrefix) { return try snippetContent(id, db) }
+            return try statement(db, "SELECT kind,payload FROM entries WHERE id=?") { stmt in
                 try bind(id, at: 1, to: stmt)
-                guard try step(stmt) == SQLITE_ROW, let kind = ClipboardKind(rawValue: string(stmt, 0)) else { return nil }
-                switch kind {
-                case .text: return .text(string(stmt, 1))
-                case .image: return data(stmt, 1).map(ClipboardContent.image)
+                guard try step(stmt) == SQLITE_ROW, let kind = ClipboardKind(rawValue: string(stmt, 0)),
+                      let bytes = data(stmt, 1) else { return nil }
+                return try content(kind, bytes)
+            }
+        }
+    }
+
+    // Standard representations often contain precisely the canonical text or PNG.
+    // Store a reference to that payload instead of charging and saving it twice.
+    private struct StoredRepresentation: Codable {
+        let type: String
+        let data: Data?
+    }
+
+    func capture(for id: String) throws -> ClipboardCapture? {
+        try withDatabase { db in
+            if id.hasPrefix(snippetPrefix) {
+                return try snippetContent(id, db).map { ClipboardCapture(content: $0) }
+            }
+            return try statement(db, "SELECT kind,payload,representations,source_id,source_name FROM entries WHERE id=?") { stmt in
+                try bind(id, at: 1, to: stmt)
+                guard try step(stmt) == SQLITE_ROW, let kind = ClipboardKind(rawValue: string(stmt, 0)),
+                      let bytes = data(stmt, 1) else { return nil }
+                let archived = try data(stmt, 2).map { try PropertyListDecoder().decode([[StoredRepresentation]].self, from: $0) } ?? []
+                let items = archived.map { $0.map { ClipboardRepresentation(type: $0.type, data: $0.data ?? bytes) } }
+                return ClipboardCapture(content: try content(kind, bytes), items: items,
+                                        sourceBundleID: optionalString(stmt, 3), sourceName: optionalString(stmt, 4))
+            }
+        }
+    }
+
+    private func snippetContent(_ id: String, _ db: OpaquePointer) throws -> ClipboardContent? {
+        try statement(db, "SELECT body FROM snippets WHERE id=?") { stmt in
+            try bind(id, at: 1, to: stmt)
+            return try step(stmt) == SQLITE_ROW ? .text(string(stmt, 0)) : nil
+        }
+    }
+
+    func snippets(matching query: String = "") throws -> [ClipboardEntry] {
+        try withDatabase { db in
+            try statement(db, "SELECT id,name,body,created,source_id,source_name FROM snippets ORDER BY created DESC,rowid DESC") { stmt in
+                var result: [ClipboardEntry] = []
+                while try step(stmt) == SQLITE_ROW {
+                    let name = string(stmt, 1), text = string(stmt, 2)
+                    guard query.isEmpty || name.localizedCaseInsensitiveContains(query) || text.localizedCaseInsensitiveContains(query) else { continue }
+                    let created = date(stmt, 3)
+                    result.append(ClipboardEntry(id: string(stmt, 0), kind: .classify(text), title: name,
+                        copiedAt: created, byteCount: text.utf8.count, firstCopiedAt: created,
+                        sourceBundleID: optionalString(stmt, 4), sourceName: optionalString(stmt, 5),
+                        isSnippet: true, formatTypes: defaultFormats(.text)))
                 }
+                return result
             }
         }
     }
 
     private struct Item {
-        let id: String
+        let fingerprint: String
         let kind: ClipboardKind
         let payload: Data
         let title: String
         let thumbnail: Data?
+        let width: Int?
+        let height: Int?
+        let formatList: Data
+        let representations: Data?
+        let itemCount: Int
+        let storageBytes: Int
+        let sourceID: String?
+        let sourceName: String?
     }
 
-    private func prepare(_ content: ClipboardContent) -> Item? {
+    private func prepare(_ capture: ClipboardCapture) throws -> Item? {
         let kind: ClipboardKind
         let payload: Data
         let title: String
-        let thumbnail: Data?
+        var thumbnail: Data?
+        var width: Int?, height: Int?
         let limit = min(maxItemBytes, maxBytes)
-        guard maxEntries > 0 else { return nil }
-        switch content {
+        guard maxEntries > 0, capture.items.count <= 200 else { return nil }
+        switch capture.content {
         case .text(let text):
             guard !text.isEmpty, text.utf8.count <= limit else { return nil }
-            kind = .text
+            kind = .classify(text)
             payload = Data(text.utf8)
             let preview = text.prefix(150).split(whereSeparator: \.isWhitespace).joined(separator: " ")
             title = preview.isEmpty ? "Whitespace" : preview
-            thumbnail = nil
         case .image(let png):
-            guard !png.isEmpty, png.count <= limit, let preview = Self.thumbnail(png) else { return nil }
+            guard !png.isEmpty, png.count <= limit, let image = Self.thumbnail(png) else { return nil }
             kind = .image
             payload = png
+            thumbnail = image.thumbnail
+            width = image.width
+            height = image.height
             title = "Image"
-            thumbnail = preview
+        case .files(let urls):
+            guard !urls.isEmpty, urls.count <= 200, urls.allSatisfy(\.isFileURL) else { return nil }
+            kind = .files
+            payload = try PropertyListEncoder().encode(urls.map(\.path))
+            guard payload.count <= limit else { return nil }
+            title = urls.count == 1 ? urls[0].lastPathComponent : "\(urls.count) Files · \(urls[0].lastPathComponent)"
         }
-        let id = kind.rawValue + "." + SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
-        return Item(id: id, kind: kind, payload: payload, title: title, thumbnail: thumbnail)
+
+        let baseKind = kind == .image || kind == .files ? kind : .text
+        let defaultType = defaultFormats(kind)[0]
+        var hash = SHA256()
+        hash.update(data: payload)
+        var archived = [[StoredRepresentation]]()
+        var types = [String]()
+        var seen = Set<String>()
+        let simple = capture.items.count == 1 && capture.items[0].count == 1
+            && capture.items[0][0].type == defaultType && capture.items[0][0].data == payload
+        var storageBytes = payload.count
+        if !capture.items.isEmpty && !simple {
+            // Length framing distinguishes item boundaries, representation names and bytes.
+            // Sorting the identifiers for the hash handles apps that offer formats in a
+            // different order on repeated copies. The archive retains their original order.
+            addLength(payload.count, to: &hash)
+            addLength(capture.items.count, to: &hash)
+        }
+        for item in capture.items {
+            guard !item.isEmpty, item.count <= 128 else { return nil }
+            var stored = [StoredRepresentation]()
+            for rep in item {
+                guard !rep.type.isEmpty, rep.type.utf8.count <= 1024 else { return nil }
+                let shared = rep.data == payload
+                if !shared {
+                    guard rep.data.count <= limit - storageBytes else { return nil }
+                    storageBytes += rep.data.count
+                }
+                if seen.insert(rep.type).inserted { types.append(rep.type) }
+                stored.append(StoredRepresentation(type: rep.type, data: shared ? nil : rep.data))
+            }
+            if !simple {
+                addLength(item.count, to: &hash)
+                for rep in item.sorted(by: { $0.type < $1.type }) {
+                    let key = Data(rep.type.utf8)
+                    addLength(key.count, to: &hash)
+                    hash.update(data: key)
+                    addLength(rep.data.count, to: &hash)
+                    hash.update(data: rep.data)
+                }
+            }
+            archived.append(stored)
+        }
+
+        let fingerprint = baseKind.rawValue + "." + hash.finalize().map { String(format: "%02x", $0) }.joined()
+        let inferredCount: Int
+        if case .files(let urls) = capture.content { inferredCount = urls.count } else { inferredCount = 1 }
+        let formatList = try PropertyListEncoder().encode(types.isEmpty ? defaultFormats(kind) : types)
+        let representations = archived.isEmpty ? nil : try PropertyListEncoder().encode(archived)
+        return Item(fingerprint: fingerprint, kind: kind, payload: payload, title: title, thumbnail: thumbnail,
+                    width: width, height: height, formatList: formatList, representations: representations,
+                    itemCount: max(capture.items.count, inferredCount), storageBytes: storageBytes,
+                    sourceID: capture.sourceBundleID, sourceName: capture.sourceName)
+    }
+
+    private func addLength(_ count: Int, to hash: inout SHA256) {
+        var size = UInt64(count).bigEndian
+        withUnsafeBytes(of: &size) { hash.update(bufferPointer: $0) }
     }
 
     @discardableResult
     func record(_ content: ClipboardContent, at date: Date = Date()) throws -> Bool {
-        try record([content], token: nil, at: date)
+        try record([ClipboardCapture(content: content)], token: nil, at: date)
     }
 
     @discardableResult
     func record(_ contents: [ClipboardContent], observing changeToken: String, at date: Date) throws -> Bool {
-        try record(contents, token: changeToken, at: date)
+        try record(contents.map { ClipboardCapture(content: $0) }, token: changeToken, at: date)
     }
 
-    private func record(_ contents: [ClipboardContent], token: String?, at date: Date) throws -> Bool {
-        let items = contents.compactMap(prepare)
+    @discardableResult
+    func record(_ capture: ClipboardCapture, observing changeToken: String, at date: Date) throws -> Bool {
+        try record([capture], token: changeToken, at: date)
+    }
+
+    private func record(_ captures: [ClipboardCapture], token: String?, at date: Date) throws -> Bool {
+        let items = try captures.compactMap(prepare)
         guard !items.isEmpty else { return false }
         return try withDatabase { db in
-            try execute(db, "BEGIN IMMEDIATE")
-            do {
-                if let token, try !claim(token, in: db) {
-                    try execute(db, "COMMIT")
-                    return false
-                }
-                if try paused(db) {
-                    try execute(db, "COMMIT")
-                    return false
-                }
+            try transaction(db) {
+                if let token, try !claim(token, in: db) { return false }
+                guard try !paused(db) else { return false }
                 var changed = false
                 for item in items.reversed() {
-                    if try insert(item, in: db, at: date) { changed = true }
+                    if try insert(item, in: db, at: date, observed: token != nil) { changed = true }
                 }
-                try statement(db, """
-                    DELETE FROM entries WHERE id IN (
-                        SELECT id FROM (
-                            SELECT id, row_number() OVER recent AS position, sum(bytes) OVER recent AS total
-                            FROM entries WINDOW recent AS (ORDER BY copied DESC, rowid DESC ROWS UNBOUNDED PRECEDING)
-                        ) WHERE position > ? OR total > ?
-                    )
-                    """) { stmt in
-                        try check(sqlite3_bind_int64(stmt, 1, Int64(maxEntries)))
-                        try check(sqlite3_bind_int64(stmt, 2, Int64(maxBytes)))
-                        try step(stmt)
-                    }
-                try execute(db, "COMMIT")
+                try trim(db)
                 return changed
-            } catch {
-                try? execute(db, "ROLLBACK")
-                throw error
             }
         }
     }
 
+    private func trim(_ db: OpaquePointer) throws {
+        try statement(db, """
+            DELETE FROM entries WHERE id IN (
+                SELECT id FROM (
+                    SELECT id,pinned,row_number() OVER recent AS position,
+                           sum(coalesce(storage_bytes,bytes)) OVER recent AS total
+                    FROM entries WINDOW recent AS (ORDER BY pinned DESC,copied DESC,rowid DESC ROWS UNBOUNDED PRECEDING)
+                ) WHERE pinned=0 AND (position > ? OR total > ?)
+            )
+            """) { stmt in
+            try check(sqlite3_bind_int64(stmt, 1, Int64(maxEntries)))
+            try check(sqlite3_bind_int64(stmt, 2, Int64(maxBytes)))
+            try step(stmt)
+        }
+    }
+
+    private func transaction<T>(_ db: OpaquePointer, _ action: () throws -> T) throws -> T {
+        try execute(db, "BEGIN IMMEDIATE")
+        do {
+            let result = try action()
+            try execute(db, "COMMIT")
+            return result
+        } catch {
+            try? execute(db, "ROLLBACK")
+            throw error
+        }
+    }
     // Two editions can observe the same pasteboard revision at different times.
     // Retain recent opaque generation tokens across deletions so a late observer
     // cannot restore an item the user just removed. The tokens contain no content.
@@ -184,30 +334,174 @@ final class ClipboardStore: Sendable {
         return fresh
     }
 
-    private func insert(_ item: Item, in db: OpaquePointer, at date: Date) throws -> Bool {
-        // Keep the newest observation time and retain the original bytes.
-        // A new rowid breaks ties between items in one multi-item copy.
-        try statement(db, """
-            INSERT INTO entries(id,kind,title,copied,bytes,thumbnail,payload) VALUES(?,?,?,?,?,?,?)
-            ON CONFLICT(id) DO UPDATE SET copied=excluded.copied, rowid=(SELECT max(rowid)+1 FROM entries)
-                WHERE excluded.copied > entries.copied
+    private func insert(_ item: Item, in db: OpaquePointer, at date: Date, observed: Bool) throws -> Bool {
+        let previousID: String? = try statement(db, """
+            SELECT id FROM entries WHERE fingerprint=? OR (fingerprint IS NULL AND id=?)
+            ORDER BY copied DESC,rowid DESC LIMIT 1
             """) { stmt in
-                try bind(item.id, at: 1, to: stmt)
-                try bind(item.kind.rawValue, at: 2, to: stmt)
-                try bind(item.title, at: 3, to: stmt)
-                try check(sqlite3_bind_double(stmt, 4, date.timeIntervalSince1970))
-                try check(sqlite3_bind_int64(stmt, 5, Int64(item.payload.count)))
-                if let thumb = item.thumbnail { try bind(thumb, at: 6, to: stmt) }
-                try bind(item.payload, at: 7, to: stmt)
+            try bind(item.fingerprint, at: 1, to: stmt)
+            try bind(item.fingerprint, at: 2, to: stmt)
+            return try step(stmt) == SQLITE_ROW ? string(stmt, 0) : nil
+        }
+        if let previousID {
+            // A distinct, claimed change token counts even if two processes observed
+            // different generations out of order. Source and ordering follow the latest.
+            return try statement(db, """
+                UPDATE entries SET
+                    source_id=CASE WHEN ? >= copied THEN ? ELSE source_id END,
+                    source_name=CASE WHEN ? >= copied THEN ? ELSE source_name END,
+                    first_copied=min(coalesce(first_copied,copied),?),
+                    rowid=CASE WHEN ? >= copied THEN (SELECT max(rowid)+1 FROM entries) ELSE rowid END,
+                    copies=copies+1,copied=max(copied,?) WHERE id=? AND (? OR ? > copied)
+                """) { stmt in
+                let stamp = date.timeIntervalSince1970
+                for i: Int32 in [1,3,5,6,7,10] { try check(sqlite3_bind_double(stmt, i, stamp)) }
+                try bind(item.sourceID, at: 2, to: stmt)
+                try bind(item.sourceName, at: 4, to: stmt)
+                try bind(previousID, at: 8, to: stmt)
+                try check(sqlite3_bind_int(stmt, 9, observed ? 1 : 0))
                 try step(stmt)
                 return sqlite3_changes(db) > 0
             }
+        }
+        // Editing preserves the selected row's identity. An old content-based ID
+        // can therefore already belong to a different, edited item.
+        let occupied = try statement(db, "SELECT 1 FROM entries WHERE id=?") { stmt in
+            try bind(item.fingerprint, at: 1, to: stmt)
+            return try step(stmt) == SQLITE_ROW
+        }
+        let id = occupied ? UUID().uuidString : item.fingerprint
+        return try statement(db, """
+            INSERT INTO entries(id,fingerprint,kind,title,copied,first_copied,bytes,payload,thumbnail,
+                                width,height,formats,representations,item_count,storage_bytes,source_id,source_name)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """) { stmt in
+            try bind(id, at: 1, to: stmt)
+            try bind(item.fingerprint, at: 2, to: stmt)
+            try bind(item.kind.rawValue, at: 3, to: stmt)
+            try bind(item.title, at: 4, to: stmt)
+            for i: Int32 in [5,6] { try check(sqlite3_bind_double(stmt, i, date.timeIntervalSince1970)) }
+            try check(sqlite3_bind_int64(stmt, 7, Int64(item.payload.count)))
+            try bind(item.payload, at: 8, to: stmt)
+            if let thumbnail = item.thumbnail { try bind(thumbnail, at: 9, to: stmt) }
+            if let width = item.width { try check(sqlite3_bind_int64(stmt, 10, Int64(width))) }
+            if let height = item.height { try check(sqlite3_bind_int64(stmt, 11, Int64(height))) }
+            try bind(item.formatList, at: 12, to: stmt)
+            if let archive = item.representations { try bind(archive, at: 13, to: stmt) }
+            try check(sqlite3_bind_int64(stmt, 14, Int64(item.itemCount)))
+            try check(sqlite3_bind_int64(stmt, 15, Int64(item.storageBytes)))
+            try bind(item.sourceID, at: 16, to: stmt)
+            try bind(item.sourceName, at: 17, to: stmt)
+            try step(stmt)
+            return sqlite3_changes(db) > 0
+        }
+    }
+
+    func rename(_ id: String, to name: String) throws {
+        let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { throw ClipboardStoreError("Enter a name for this item.") }
+        let sql = id.hasPrefix(snippetPrefix) ? "UPDATE snippets SET name=? WHERE id=?" : "UPDATE entries SET custom_title=? WHERE id=?"
+        try withDatabase { db in
+            try statement(db, sql) { stmt in
+                try bind(title, at: 1, to: stmt)
+                try bind(id, at: 2, to: stmt)
+                try step(stmt)
+            }
+        }
+    }
+
+    func setPinned(_ id: String, _ value: Bool) throws {
+        try withDatabase { db in
+            try statement(db, "UPDATE entries SET pinned=? WHERE id=?") { stmt in
+                try check(sqlite3_bind_int(stmt, 1, value ? 1 : 0))
+                try bind(id, at: 2, to: stmt)
+                try step(stmt)
+            }
+        }
+    }
+
+    func saveSnippet(_ id: String, named name: String) throws {
+        let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { throw ClipboardStoreError("Enter a name for the snippet.") }
+        try withDatabase { db in
+            try statement(db, """
+                INSERT INTO snippets(id,name,body,created,source_id,source_name)
+                SELECT ?,?,payload,?,source_id,source_name FROM entries WHERE id=? AND kind NOT IN ('image','files')
+                """) { stmt in
+                try bind(snippetPrefix + UUID().uuidString, at: 1, to: stmt)
+                try bind(title, at: 2, to: stmt)
+                try check(sqlite3_bind_double(stmt, 3, Date().timeIntervalSince1970))
+                try bind(id, at: 4, to: stmt)
+                try step(stmt)
+                guard sqlite3_changes(db) == 1 else { throw ClipboardStoreError("This text is no longer available to save.") }
+            }
+        }
+    }
+
+    func edit(_ id: String, text: String) throws {
+        guard let item = try prepare(ClipboardCapture(content: .text(text))) else {
+            throw ClipboardStoreError("Enter text within the clipboard item size limit.")
+        }
+        try withDatabase { db in
+            if id.hasPrefix(snippetPrefix) {
+                try statement(db, "UPDATE snippets SET body=? WHERE id=?") { stmt in
+                    try bind(item.payload, at: 1, to: stmt)
+                    try bind(id, at: 2, to: stmt)
+                    try step(stmt)
+                }
+                return
+            }
+            try transaction(db) {
+                try statement(db, """
+                    UPDATE entries SET fingerprint=?,kind=?,title=?,payload=?,bytes=?,storage_bytes=?,formats=?,
+                        representations=NULL,ocr=NULL,item_count=1
+                    WHERE id=? AND kind NOT IN ('image','files')
+                    """) { stmt in
+                    try bind(item.fingerprint, at: 1, to: stmt)
+                    try bind(item.kind.rawValue, at: 2, to: stmt)
+                    try bind(item.title, at: 3, to: stmt)
+                    try bind(item.payload, at: 4, to: stmt)
+                    for i: Int32 in [5,6] { try check(sqlite3_bind_int64(stmt, i, Int64(item.payload.count))) }
+                    try bind(item.formatList, at: 7, to: stmt)
+                    try bind(id, at: 8, to: stmt)
+                    try step(stmt)
+                    guard sqlite3_changes(db) == 1 else { throw ClipboardStoreError("This item cannot be edited.") }
+                }
+                try trim(db)
+                let retained = try statement(db, "SELECT 1 FROM entries WHERE id=?") { stmt in
+                    try bind(id, at: 1, to: stmt)
+                    return try step(stmt) == SQLITE_ROW
+                }
+                guard retained else { throw ClipboardStoreError("There is not enough room to keep this edit.") }
+            }
+        }
+    }
+
+    func setRecognizedText(_ text: String, for id: String) throws {
+        try withDatabase { db in
+            try statement(db, "UPDATE entries SET ocr=? WHERE id=? AND kind='image'") { stmt in
+                try bind(text, at: 1, to: stmt)
+                try bind(id, at: 2, to: stmt)
+                try step(stmt)
+            }
+        }
     }
 
     func remove(_ id: String) throws {
+        let sql = id.hasPrefix(snippetPrefix) ? "DELETE FROM snippets WHERE id=?" : "DELETE FROM entries WHERE id=?"
         try withDatabase { db in
-            try statement(db, "DELETE FROM entries WHERE id=?") { stmt in
+            try statement(db, sql) { stmt in
                 try bind(id, at: 1, to: stmt)
+                try step(stmt)
+            }
+        }
+    }
+
+    func clear(since cutoff: Date, includingPinned: Bool = false) throws {
+        try withDatabase { db in
+            try statement(db, "DELETE FROM entries WHERE copied >= ? AND (? OR pinned=0)") { stmt in
+                try check(sqlite3_bind_double(stmt, 1, cutoff.timeIntervalSince1970))
+                try check(sqlite3_bind_int(stmt, 2, includingPinned ? 1 : 0))
                 try step(stmt)
             }
         }
@@ -225,7 +519,23 @@ final class ClipboardStore: Sendable {
         try statement(db, "SELECT 1 FROM settings WHERE name='paused'") { try step($0) == SQLITE_ROW }
     }
 
-    private static func thumbnail(_ png: Data) -> Data? {
+    private func date(_ stmt: OpaquePointer, _ column: Int32) -> Date {
+        Date(timeIntervalSince1970: sqlite3_column_double(stmt, column))
+    }
+
+    private func optionalString(_ stmt: OpaquePointer, _ column: Int32) -> String? {
+        sqlite3_column_type(stmt, column) == SQLITE_NULL ? nil : string(stmt, column)
+    }
+
+    private func optionalInt(_ stmt: OpaquePointer, _ column: Int32) -> Int? {
+        sqlite3_column_type(stmt, column) == SQLITE_NULL ? nil : Int(sqlite3_column_int64(stmt, column))
+    }
+
+    private func bind(_ value: String?, at column: Int32, to stmt: OpaquePointer) throws {
+        if let value { try bind(value, at: column, to: stmt) }
+        else { try check(sqlite3_bind_null(stmt, column)) }
+    }
+    private static func thumbnail(_ png: Data) -> (thumbnail: Data, width: Int, height: Int)? {
         guard let source = CGImageSourceCreateWithData(png as CFData, nil), CGImageSourceGetType(source) as String? == UTType.png.identifier,
               let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let w = props[kCGImagePropertyPixelWidth] as? Int, let h = props[kCGImagePropertyPixelHeight] as? Int,
@@ -236,7 +546,7 @@ final class ClipboardStore: Sendable {
         let buffer = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(buffer, UTType.png.identifier as CFString, 1, nil) else { return nil }
         CGImageDestinationAddImage(destination, image, nil)
-        return CGImageDestinationFinalize(destination) ? buffer as Data : nil
+        return CGImageDestinationFinalize(destination) ? (buffer as Data, w, h) : nil
     }
 
     private func withDatabase<T>(_ body: (OpaquePointer) throws -> T) throws -> T {
@@ -257,15 +567,75 @@ final class ClipboardStore: Sendable {
         guard let db = connection else { throw ClipboardStoreError("Couldn’t open clipboard history.") }
         try check(sqlite3_busy_timeout(db, 5_000))
         try execute(db, "PRAGMA secure_delete=ON")
-        try execute(db, """
-            CREATE TABLE IF NOT EXISTS entries (
-                id TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, title TEXT NOT NULL, copied REAL NOT NULL,
-                bytes INTEGER NOT NULL, thumbnail BLOB, payload BLOB NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS settings(name TEXT PRIMARY KEY);
-            CREATE TABLE IF NOT EXISTS observations(token TEXT NOT NULL UNIQUE);
-            """)
+        try migrate(db)
         return try body(db)
+    }
+    private func migrate(_ db: OpaquePointer) throws {
+        func schemaVersion() throws -> Int32 {
+            try statement(db, "PRAGMA user_version") { stmt in
+                try step(stmt)
+                return sqlite3_column_int(stmt, 0)
+            }
+        }
+        guard try schemaVersion() == 0 else { return }
+        try transaction(db) {
+            // A second edition can finish upgrading while this connection waits for the lock.
+            guard try schemaVersion() == 0 else { return }
+            try execute(db, """
+                CREATE TABLE IF NOT EXISTS entries (
+                    id TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, title TEXT NOT NULL, copied REAL NOT NULL,
+                    bytes INTEGER NOT NULL, thumbnail BLOB, payload BLOB NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS settings(name TEXT PRIMARY KEY);
+                CREATE TABLE IF NOT EXISTS observations(token TEXT NOT NULL UNIQUE);
+                ALTER TABLE entries ADD COLUMN fingerprint TEXT;
+                ALTER TABLE entries ADD COLUMN first_copied REAL;
+                ALTER TABLE entries ADD COLUMN copies INTEGER NOT NULL DEFAULT 1;
+                ALTER TABLE entries ADD COLUMN source_id TEXT;
+                ALTER TABLE entries ADD COLUMN source_name TEXT;
+                ALTER TABLE entries ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE entries ADD COLUMN custom_title TEXT;
+                ALTER TABLE entries ADD COLUMN formats BLOB;
+                ALTER TABLE entries ADD COLUMN representations BLOB;
+                ALTER TABLE entries ADD COLUMN item_count INTEGER NOT NULL DEFAULT 1;
+                ALTER TABLE entries ADD COLUMN storage_bytes INTEGER;
+                ALTER TABLE entries ADD COLUMN ocr TEXT;
+                ALTER TABLE entries ADD COLUMN width INTEGER;
+                ALTER TABLE entries ADD COLUMN height INTEGER;
+                UPDATE entries SET fingerprint=id, first_copied=copied, storage_bytes=bytes;
+                CREATE INDEX entry_fingerprint ON entries(fingerprint);
+                CREATE TABLE snippets(id TEXT PRIMARY KEY, name TEXT NOT NULL, body BLOB NOT NULL, created REAL NOT NULL,
+                                      source_id TEXT, source_name TEXT);
+                """)
+            // Reconstruct only metadata present in the older payloads. The old
+            // schema did not capture source application, earlier times or copy count.
+            try statement(db, "SELECT id,kind,payload FROM entries") { stmt in
+                while try step(stmt) == SQLITE_ROW {
+                    let id = string(stmt, 0)
+                    if string(stmt, 1) == "text" {
+                        let kind = ClipboardKind.classify(string(stmt, 2))
+                        if kind != .text {
+                            try statement(db, "UPDATE entries SET kind=? WHERE id=?") { update in
+                                try bind(kind.rawValue, at: 1, to: update)
+                                try bind(id, at: 2, to: update)
+                                try step(update)
+                            }
+                        }
+                    } else if let bytes = data(stmt, 2),
+                              let src = CGImageSourceCreateWithData(bytes as CFData, nil),
+                              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+                              let width = props[kCGImagePropertyPixelWidth] as? Int, let height = props[kCGImagePropertyPixelHeight] as? Int {
+                        try statement(db, "UPDATE entries SET width=?, height=? WHERE id=?") { update in
+                            try check(sqlite3_bind_int64(update, 1, Int64(width)))
+                            try check(sqlite3_bind_int64(update, 2, Int64(height)))
+                            try bind(id, at: 3, to: update)
+                            try step(update)
+                        }
+                    }
+                }
+            }
+            try execute(db, "PRAGMA user_version=1")
+        }
     }
 
     private func execute(_ db: OpaquePointer, _ sql: String) throws {
