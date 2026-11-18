@@ -1,7 +1,8 @@
 import AVFoundation
 import CoreImage
 import Testing
-@testable import ShadTools
+@testable import ShadCore
+@testable import ShadCaptureFeature
 
 @Suite("Presentation recording")
 struct CameraRecorderTests {

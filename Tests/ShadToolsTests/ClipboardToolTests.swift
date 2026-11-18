@@ -2,10 +2,22 @@ import AppKit
 import ImageIO
 import Testing
 import UniformTypeIdentifiers
-@testable import ShadTools
+@testable import ShadCore
+@testable import ShadClipboardFeature
 
 @Suite("Clipboard monitoring")
 struct ClipboardToolTests {
+    @Test func oversizedRichDocumentIsSkippedWithoutRenderingIt() {
+        let board = NSPasteboard.withUniqueName()
+        defer { board.releaseGlobally() }
+        let item = NSPasteboardItem()
+        var html = Data("<p>Example</p>".utf8)
+        html.append(Data(repeating: 32, count: ClipboardStore.maximumItemBytes))
+        item.setData(html, forType: .html)
+        board.writeObjects([item])
+        #expect(ClipboardPasteboard.capture(board, expectedChange: board.changeCount, frontmostBundleID: nil) == nil)
+    }
+
     @Test @MainActor func observesOnlyNewCopiesAndAvoidsRecapturingItsOwnWrites() async throws {
         let board = NSPasteboard.withUniqueName()
         defer { board.releaseGlobally() }
@@ -188,6 +200,64 @@ struct ClipboardToolTests {
                 #expect(try Data(contentsOf: destination.appendingPathComponent(url.lastPathComponent)) == member.1)
             }
         }
+    }
+
+    @Test func upgradeMovesRetainedMarkupAndRemovesObsoletePreviewCopies() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ClipboardStore(directory: root.appendingPathComponent("database"))
+        let legacy = root.appendingPathComponent("legacy")
+        let image = try #require(NSImage(systemSymbolName: "pencil", accessibilityDescription: nil))
+        let png = try #require(image.tiffRepresentation.flatMap { NSBitmapImageRep(data: $0)?.representation(using: .png, properties: [:]) })
+        #expect(try store.record(.image(png)))
+        let entry = try #require(store.entries().first)
+        let old = try ClipboardFileActions.materialize(entry: entry, content: .image(png), action: .annotate, root: legacy)
+        let edited = Data("user markup fixture".utf8)
+        try edited.write(to: old)
+        let orphan = try ClipboardFileActions.materialize(entry: entry, content: .text("Previously deleted"), action: .quickLook, root: legacy)
+        try store.migratePreviewCopies(from: legacy)
+        #expect(!FileManager.default.fileExists(atPath: orphan.path))
+        #expect(!FileManager.default.fileExists(atPath: old.path))
+        let restored = try store.withPreviewCopies(for: entry.id) { capture, directory in
+            try ClipboardFileActions.materialize(entry: entry, content: capture.content, action: .reveal, root: directory)
+        }
+        #expect(try Data(contentsOf: restored) == edited)
+        try store.clear()
+        #expect(!FileManager.default.fileExists(atPath: restored.path))
+    }
+
+    @Test func deletingOrEvictingHistoryRemovesPrivateWorkingCopiesAndPreservesOriginalFiles() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ClipboardStore(directory: root, maxEntries: 1)
+        #expect(try store.record(.text("First fixture")))
+        let entry = try #require(store.entries().first)
+        func materialize(_ item: ClipboardEntry) throws -> URL {
+            try store.withPreviewCopies(for: item.id) { capture, folder in
+                try ClipboardFileActions.materialize(entry: item, content: capture.content, action: .quickLook, root: folder)
+            }
+        }
+        let workingCopy = try materialize(entry)
+        let fm = FileManager.default
+        #expect((try fm.attributesOfItem(atPath: workingCopy.path)[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+        try store.edit(entry.id, text: "Edited fixture")
+        #expect(!fm.fileExists(atPath: workingCopy.path))
+        let editedCopy = try materialize(entry)
+        #expect(try String(contentsOf: editedCopy, encoding: .utf8) == "Edited fixture")
+        let original = root.appendingPathComponent("Original user file.txt")
+        try Data("Keep".utf8).write(to: original)
+        #expect(try store.record(.files([original])))
+        #expect(!fm.fileExists(atPath: editedCopy.path))
+        #expect(throws: (any Error).self) { _ = try materialize(entry) }
+        try store.clear()
+        #expect(try Data(contentsOf: original) == Data("Keep".utf8))
+        #expect(try store.record(.text("Other fixture")))
+        let other = try #require(store.entries().first)
+        let secondCopy = try materialize(other)
+        let anotherEdition = ClipboardStore(directory: root)
+        try anotherEdition.remove(other.id)
+        #expect(!fm.fileExists(atPath: secondCopy.path))
+        #expect(throws: (any Error).self) { _ = try materialize(other) }
     }
 
     @Test func preservesNativeColorAndItsAlphaValue() throws {

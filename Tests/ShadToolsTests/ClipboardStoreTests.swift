@@ -2,10 +2,25 @@ import AppKit
 import Foundation
 import SQLite3
 import Testing
-@testable import ShadTools
+@testable import ShadCore
+@testable import ShadClipboardFeature
 
 @Suite("Clipboard history storage")
 struct ClipboardStoreTests {
+    @Test func reopeningRepairsPermissionsOnExistingHistory() throws {
+        let files = FileManager.default
+        let directory = files.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? files.removeItem(at: directory) }
+        let store = ClipboardStore(directory: directory)
+        try store.record(.text("Private permission fixture"))
+        let database = directory.appendingPathComponent("history.sqlite3")
+        try files.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
+        try files.setAttributes([.posixPermissions: 0o644], ofItemAtPath: database.path)
+        #expect(try store.entries().count == 1)
+        #expect(try files.attributesOfItem(atPath: directory.path)[.posixPermissions] as? Int == 0o700)
+        #expect(try files.attributesOfItem(atPath: database.path)[.posixPermissions] as? Int == 0o600)
+    }
+
     @Test func persistsTextImagesAndTheirPreviews() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }

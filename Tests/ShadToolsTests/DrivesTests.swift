@@ -1,5 +1,6 @@
 import Testing
-@testable import ShadTools
+@testable import ShadCore
+@testable import ShadDrivesFeature
 
 struct DrivesTests {
     let external: DriveInventory.Plist = [

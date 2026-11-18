@@ -1,0 +1,256 @@
+--- a/macshot/AppDelegate.swift
++++ b/macshot/AppDelegate.swift
+@@ -1,6 +1,5 @@
+ import Cocoa
+ import Carbon
+-import Sparkle
+ import ServiceManagement
+ import UniformTypeIdentifiers
+ import AVFoundation
+@@ -191,10 +190,9 @@
+ }
+ 
+ @MainActor
+-class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
++class AppDelegate: NSObject, NSApplicationDelegate {
+ 
+     private var statusItem: NSStatusItem!
+-    private var updaterController: SPUStandardUpdaterController!
+     private var overlayControllers: [OverlayWindowController] = []
+     private var settingsController: SettingsWindowController?
+     private var onboardingController: PermissionOnboardingController?
+@@ -261,7 +259,7 @@
+         if running.count > 1 {
+             // Tell the existing instance to show its icon and open Settings
+             DistributedNotificationCenter.default().postNotificationName(
+-                .init("com.sw33tlie.macshot.showAndOpenPrefs"),
++                .init("io.github.syedshad.shadtools.captureengine.showAndOpenPrefs"),
+                 object: nil, userInfo: nil, deliverImmediately: true
+             )
+             NSApp.terminate(nil)
+@@ -295,9 +293,6 @@
+         // traces to distinguish Jetsam kills from normal termination.
+         setupSignalHandlers()
+ 
+-        // Offer to move to /Applications if running from a DMG or translocated path
+-        promptToMoveToApplicationsIfNeeded()
+-
+         migrateFilenameTemplateIfNeeded()
+ 
+         // Reclaim disk from stale tmp leftovers (cancelled recordings,
+@@ -311,11 +306,6 @@
+         // something references ScreenshotHistory.shared.
+         _ = ScreenshotHistory.shared
+ 
+-        updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: self, userDriverDelegate: nil)
+-        // Disable silent update downloads — updates should only apply
+-        // via explicit user action ("Check for Updates..." / Install),
+-        // so an automatic update can't be mistaken for a silent crash.
+-        updaterController.updater.automaticallyDownloadsUpdates = false
+         setupMainMenu()
+         setupStatusBar()
+         DistributedNotificationCenter.default().addObserver(
+@@ -333,7 +323,7 @@
+         // Listen for duplicate-launch notification to restore icon
+         DistributedNotificationCenter.default().addObserver(
+             self, selector: #selector(handleShowAndOpenPrefs),
+-            name: .init("com.sw33tlie.macshot.showAndOpenPrefs"), object: nil
++            name: .init("io.github.syedshad.shadtools.captureengine.showAndOpenPrefs"), object: nil
+         )
+ 
+         // Dismiss overlays when the user switches spaces
+@@ -560,55 +550,6 @@
+         d.removeObject(forKey: "useWindowTitleInFilename")
+     }
+ 
+-    /// If the app is running from a DMG volume or a translocated path,
+-    /// offer to move it to /Applications for proper operation (auto-updates,
+-    /// persistent preferences, no translocation issues).
+-    private func promptToMoveToApplicationsIfNeeded() {
+-        let bundlePath = Bundle.main.bundlePath
+-        let isOnDMG = bundlePath.hasPrefix("/Volumes/")
+-        let isTranslocated = bundlePath.contains("/AppTranslocation/")
+-        guard isOnDMG || isTranslocated else { return }
+-        guard !UserDefaults.standard.bool(forKey: "suppressMoveToApplications") else { return }
+-
+-        let alert = NSAlert()
+-        alert.messageText = "Move to Applications folder?"
+-        alert.informativeText = "\(BuildVariant.displayName) is running from a disk image. Move it to your Applications folder for auto-updates and best experience."
+-        alert.addButton(withTitle: "Move to Applications")
+-        alert.addButton(withTitle: "Not Now")
+-        alert.showsSuppressionButton = true
+-        alert.suppressionButton?.title = "Don't ask again"
+-
+-        let response = alert.runModal()
+-        if alert.suppressionButton?.state == .on {
+-            UserDefaults.standard.set(true, forKey: "suppressMoveToApplications")
+-        }
+-        guard response == .alertFirstButtonReturn else { return }
+-
+-        let dest = URL(fileURLWithPath: "/Applications/\(BuildVariant.displayName).app")
+-        let src = URL(fileURLWithPath: bundlePath)
+-        do {
+-            // Remove old version if present
+-            if FileManager.default.fileExists(atPath: dest.path) {
+-                try FileManager.default.removeItem(at: dest)
+-            }
+-            try FileManager.default.copyItem(at: src, to: dest)
+-            // Relaunch from /Applications
+-            let task = Process()
+-            task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+-            // Preserve any cold-launch request that arrived before the user
+-            // accepted this move prompt. `-a` makes the copied bundle the
+-            // explicit recipient of both custom URLs and file URLs.
+-            task.arguments = ["-n", "-a", dest.path]
+-                + pendingOpenURLs.map(\.absoluteString)
+-            try task.run()
+-            NSApp.terminate(nil)
+-        } catch {
+-            let errAlert = NSAlert()
+-            errAlert.messageText = "Could not move to Applications"
+-            errAlert.informativeText = "Please drag macshot to your Applications folder manually.\n\n\(error.localizedDescription)"
+-            errAlert.runModal()
+-        }
+-    }
+ 
+     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+         terminationCoordinator.request(hasActiveWork: recordingEngine != nil || MediaExportCoordinator.shared.hasActiveJobs || ScreenshotHistory.shared.hasPendingWrites,
+@@ -905,11 +846,6 @@
+         prefsItem.target = self
+         prefsItem.image = NSImage(systemSymbolName: "gear", accessibilityDescription: nil)
+         menu.addItem(prefsItem)
+-
+-        let updateItem = NSMenuItem(title: L("Check for Updates..."), action: #selector(checkForUpdates), keyEquivalent: "")
+-        updateItem.target = self
+-        updateItem.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: nil)
+-        menu.addItem(updateItem)
+ 
+         menu.addItem(NSMenuItem.separator())
+ 
+@@ -2429,7 +2365,7 @@
+         let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "tiff", "tif", "bmp", "gif", "heic", "heif", "webp", "icns"]
+         let videoExtensions: Set<String> = ["mp4", "mov", "m4v"]
+         for url in urls {
+-            if url.scheme == "macshot" {
++            if url.scheme == "shadcapture" {
+                 let urlSchemeEnabled = UserDefaults.standard.object(forKey: "urlSchemeEnabled") as? Bool ?? true
+                 guard urlSchemeEnabled else { continue }
+                 if Self.screenCaptureURLActions.contains(url.host ?? "") {
+@@ -2517,20 +2453,10 @@
+ 
+     // MARK: - Quit
+ 
+-    @objc private func checkForUpdates() {
+-        NSApp.activate(ignoringOtherApps: true)
+-        updaterController.checkForUpdates(nil)
+-    }
+-
+     @objc private func quitApp() {
+         NSApp.terminate(nil)
+     }
+ 
+-    // MARK: - SPUUpdaterDelegate
+-
+-    func allowedChannels(for updater: SPUUpdater) -> Set<String> {
+-        UserDefaults.standard.bool(forKey: "betaUpdatesEnabled") ? ["beta"] : []
+-    }
+ }
+ 
+ // MARK: - OverlayWindowControllerDelegate
+--- a/macshot/UI/Windows/SettingsWindowController.swift
++++ b/macshot/UI/Windows/SettingsWindowController.swift
+@@ -95,8 +95,6 @@
+     private var filenameTemplatePreview: NSTextField!
+     private var recordingFilenameTemplateField: NSTextField!
+     private var recordingFilenameTemplatePreview: NSTextField!
+-    private var autoUpdateCheckbox: NSButton!
+-    private var betaUpdateCheckbox: NSButton!
+     private var accentColorWell: NSColorWell!
+     private var iconColorWell: NSColorWell!
+     private var bgColorWell: NSColorWell!
+@@ -489,7 +487,7 @@
+         stack.addArrangedSubview(indented(iconNote))
+         stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
+ 
+-        let urlSchemeCheckbox = NSButton(checkboxWithTitle: L("Enable macshot:// URL scheme"), target: self, action: #selector(urlSchemeChanged(_:)))
++        let urlSchemeCheckbox = NSButton(checkboxWithTitle: L("Enable shadcapture:// URL scheme"), target: self, action: #selector(urlSchemeChanged(_:)))
+         urlSchemeCheckbox.state = (UserDefaults.standard.object(forKey: "urlSchemeEnabled") as? Bool ?? true) ? .on : .off
+ 
+         let urlSchemeInfoIcon = HoverPopoverIconView(
+@@ -510,14 +508,6 @@
+         urlSchemeRow.alignment = .centerY
+         stack.addArrangedSubview(indented(urlSchemeRow))
+         stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
+-
+-        autoUpdateCheckbox = NSButton(checkboxWithTitle: L("Check for updates automatically"), target: self, action: #selector(autoUpdateChanged(_:)))
+-        stack.addArrangedSubview(indented(autoUpdateCheckbox))
+-        stack.setCustomSpacing(4, after: stack.arrangedSubviews.last!)
+-
+-        betaUpdateCheckbox = NSButton(checkboxWithTitle: L("Check for beta updates"), target: self, action: #selector(betaUpdateChanged(_:)))
+-        stack.addArrangedSubview(indented(betaUpdateCheckbox))
+-        stack.setCustomSpacing(20, after: stack.arrangedSubviews.last!)
+ 
+         // ── Appearance ───────────────────────────────────────
+         stack.addArrangedSubview(sectionHeader(L("Appearance")))
+@@ -2704,11 +2694,6 @@
+         recordingFilenameTemplateField.stringValue = UserDefaults.standard.string(forKey: FilenameFormatter.recordingUserDefaultsKey) ?? FilenameFormatter.defaultRecordingTemplate
+         updateRecordingFilenamePreview()
+ 
+-        let autoUpdate = UserDefaults.standard.object(forKey: "SUEnableAutomaticChecks") as? Bool ?? true
+-        autoUpdateCheckbox.state = autoUpdate ? .on : .off
+-
+-        betaUpdateCheckbox.state = UserDefaults.standard.bool(forKey: "betaUpdatesEnabled") ? .on : .off
+-
+         accentColorWell.color = ToolbarLayout.accentColor
+         iconColorWell.color = ToolbarLayout.iconColor
+         bgColorWell.color = ToolbarLayout.bgColor
+@@ -3280,20 +3265,20 @@
+         if let existing = urlSchemeInfoPopover, existing.isShown { return }
+ 
+         let commands: [(String, String)] = [
+-            ("macshot://capture",             L("Start area capture")),
+-            ("macshot://capture-fullscreen",  L("Capture the full screen")),
+-            ("macshot://capture-last",        L("Re-capture the last selected area")),
+-            ("macshot://quick-capture",       L("Quick capture (uses your Enter action)")),
+-            ("macshot://ocr",                 L("Capture area and read text/QR codes")),
+-            ("macshot://ocr-translate?target=zh-CN", L("Capture, translate, and overlay the text on the image")),
+-            ("macshot://record",              L("Start area recording")),
+-            ("macshot://record-fullscreen",   L("Start full-screen recording")),
+-            ("macshot://stop-recording",      L("Stop the current recording")),
+-            ("macshot://scroll-capture",      L("Start scroll capture")),
+-            ("macshot://history",             L("Open the recent captures overlay")),
+-            ("macshot://settings",            L("Open this settings window")),
+-            ("macshot://open?file=/path.png", L("Open an image file in the editor")),
+-            ("macshot://edit?id=<id>",        L("Open a history entry in the editor (keeps annotations editable)")),
++            ("shadcapture://capture",             L("Start area capture")),
++            ("shadcapture://capture-fullscreen",  L("Capture the full screen")),
++            ("shadcapture://capture-last",        L("Re-capture the last selected area")),
++            ("shadcapture://quick-capture",       L("Quick capture (uses your Enter action)")),
++            ("shadcapture://ocr",                 L("Capture area and read text/QR codes")),
++            ("shadcapture://ocr-translate?target=zh-CN", L("Capture, translate, and overlay the text on the image")),
++            ("shadcapture://record",              L("Start area recording")),
++            ("shadcapture://record-fullscreen",   L("Start full-screen recording")),
++            ("shadcapture://stop-recording",      L("Stop the current recording")),
++            ("shadcapture://scroll-capture",      L("Start scroll capture")),
++            ("shadcapture://history",             L("Open the recent captures overlay")),
++            ("shadcapture://settings",            L("Open this settings window")),
++            ("shadcapture://open?file=/path.png", L("Open an image file in the editor")),
++            ("shadcapture://edit?id=<id>",        L("Open a history entry in the editor (keeps annotations editable)")),
+         ]
+ 
+         let title = NSTextField(labelWithString: L("Supported URL Scheme Commands"))
+@@ -3406,14 +3391,6 @@
+         let custom = menuBarIconModePopup.indexOfSelectedItem == 1
+         menuBarIconSymbolField.isEnabled = custom
+         menuBarIconPresetPopup.isEnabled = custom
+-    }
+-
+-    @objc private func autoUpdateChanged(_ sender: NSButton) {
+-        UserDefaults.standard.set(sender.state == .on, forKey: "SUEnableAutomaticChecks")
+-    }
+-
+-    @objc private func betaUpdateChanged(_ sender: NSButton) {
+-        UserDefaults.standard.set(sender.state == .on, forKey: "betaUpdatesEnabled")
+     }
+ 
+     @objc private func translationProviderChanged(_ sender: NSPopUpButton) {

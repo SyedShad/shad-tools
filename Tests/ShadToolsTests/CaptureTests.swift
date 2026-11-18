@@ -1,6 +1,7 @@
 import Foundation
 import Testing
-@testable import ShadTools
+@testable import ShadCore
+@testable import ShadCaptureFeature
 
 @Suite("Capture commands and native engine routing")
 struct CaptureTests {
@@ -11,7 +12,7 @@ struct CaptureTests {
         ]
         #expect(Set(CaptureAction.allCases.map(\.rawValue)) == expected)
         for action in CaptureAction.allCases {
-            #expect(action.url.scheme == "macshot")
+            #expect(action.url.scheme == "shadcapture")
             #expect(action.url.host == action.rawValue)
         }
     }
@@ -27,6 +28,7 @@ struct CaptureTests {
     @Test func compatibleRunningHelperReceivesActionsAcrossEditions() throws {
         let local = URL(fileURLWithPath: "/Applications/macshot.app")
         let bundled = CaptureEngine.embedded(in: URL(fileURLWithPath: "/Applications/Shad Tools.app"))
+        #expect(CaptureEngine.requirement(in: bundled) == nil)
         for version in ["4.4.0", "4.10.0"] {
             let compatible = CaptureEngine.RunningCopy(url: local, version: version, trusted: true)
             #expect(try CaptureEngine.destination(embedded: bundled, running: [compatible]) == local)
@@ -34,6 +36,8 @@ struct CaptureTests {
         for incompatible in [CaptureEngine.RunningCopy(url: local, version: "4.3.0", trusted: true),
                              CaptureEngine.RunningCopy(url: local, version: "4.9.0", trusted: false)] {
             #expect(throws: CaptureEngineError.self) { try CaptureEngine.destination(embedded: bundled, running: [incompatible]) }
+            let compatible = CaptureEngine.RunningCopy(url: bundled, version: "4.4.0", trusted: true)
+            #expect(throws: CaptureEngineError.self) { try CaptureEngine.destination(embedded: bundled, running: [compatible, incompatible]) }
         }
     }
 

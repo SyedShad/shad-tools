@@ -1,6 +1,7 @@
 import AppKit
 import Testing
-@testable import ShadTools
+@testable import ShadCore
+@testable import ShadMouseFeature
 
 @Suite("Mouse triggers and gestures")
 @MainActor

@@ -1,5 +1,6 @@
 import Testing
-@testable import ShadTools
+@testable import ShadCore
+@testable import ShadClipboardFeature
 
 @Suite("Clipboard color representations")
 struct ClipboardColorTests {

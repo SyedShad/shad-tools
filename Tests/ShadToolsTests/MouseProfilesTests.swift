@@ -1,7 +1,8 @@
 import AppKit
 import Carbon.HIToolbox
 import Testing
-@testable import ShadTools
+@testable import ShadCore
+@testable import ShadMouseFeature
 
 @Suite("Mouse action profiles") @MainActor
 struct MouseProfileTests {

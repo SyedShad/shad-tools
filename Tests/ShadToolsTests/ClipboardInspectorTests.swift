@@ -1,7 +1,8 @@
 import AppKit
 import Foundation
 import Testing
-@testable import ShadTools
+@testable import ShadCore
+@testable import ShadClipboardFeature
 
 @Suite("Clipboard item inspector")
 struct ClipboardInspectorTests {

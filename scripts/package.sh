@@ -2,39 +2,64 @@
 # Build independent macOS app bundles and product archives using Apple tools.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-version=${VERSION:-0.5.0}
+version=${VERSION:-0.6.0}
 case "$version" in *[!0-9.]*|'') echo 'VERSION must be numeric with dots' >&2; exit 2;; esac
 work=$(mktemp -d "${TMPDIR:-/tmp}/shad-pack.XXXXXX")
-trap 'rm -rf "$work"' EXIT
+lock=""
+promoted=()
+finish() {
+    local status=$? path
+    if [[ "$status" != 0 && -n "$lock" ]]; then
+        # Restore the exact previous release if a file move failed during promotion.
+        for path in "${promoted[@]+"${promoted[@]}"}"; do
+            if [[ -e "$output/$path" ]]; then mv "$output/$path" "$staged/$path"; fi
+            if [[ -e "$work/previous/$path" ]]; then mv "$work/previous/$path" "$output/$path"; fi
+        done
+    fi
+    if [[ -n "$lock" ]]; then rm -f "$lock"; fi
+    rm -rf "$work"
+}
+trap finish EXIT
+# An optional edition builds just its dependencies, without fetching other tools' resources.
+selection=${1:-all}
+[[ $# -le 1 ]] || { echo "usage: $0 [suite|search|audio|drives|color|windows|capture|clipboard|mouse]" >&2; exit 2; }
+editions=()
+products=()
+names=()
+needs_capture=false
+while IFS=$'\t' read -r edition product feature name; do
+    [[ "$selection" == all || "$selection" == "$edition" ]] || continue
+    editions+=("$edition")
+    products+=("$product")
+    names+=("$name")
+    if [[ "$edition" == suite || "$edition" == capture ]]; then needs_capture=true; fi
+done < Packaging/Editions.tsv
+[[ ${#editions[@]} -gt 0 ]] || { echo "Unknown edition: $selection" >&2; exit 2; }
 output="$PWD/dist"
-mkdir -p "$output"
+if [[ "$selection" != all ]]; then output="$output/standalone/$selection"; fi
+staged="$work/products"
+mkdir -p "$staged/apps"
 for arch in arm64 x86_64; do
     options=(--scratch-path ".build/package-$arch" -c release --triple "$arch-apple-macosx13.0")
-    swift build "${options[@]}" --product ShadTools
+    if [[ "$selection" == all ]]; then swift build "${options[@]}"
+    else swift build "${options[@]}" --product "${products[0]}"
+    fi
     bindir=$(swift build "${options[@]}" --show-bin-path)
-    cp "$bindir/ShadTools" "$work/$arch"
+    for product in "${products[@]}"; do cp "$bindir/$product" "$work/$product-$arch"; done
 done
-lipo -create "$work/arm64" "$work/x86_64" -output "$work/ShadTools"
 swift scripts/icon.swift "$work/Shad.iconset"
 iconutil -c icns "$work/Shad.iconset" -o "$work/Shad.icns"
-./scripts/prepare-capture-engine.sh "$work/capture-engine"
-for edition in suite search audio drives color windows capture clipboard mouse; do
-    case "$edition" in
-        suite) name='Shad Tools';;
-        search) name='Shad Search';;
-        audio) name='Shad Audio';;
-        drives) name='Shad Eject';;
-        color) name='Shad Color';;
-        windows) name='Shad Windows';;
-        capture) name='Shad Capture';;
-        clipboard) name='Shad Clipboard';;
-        mouse) name='Shad Mouse';;
-    esac
+if [[ "$needs_capture" == true ]]; then ./scripts/prepare-capture-engine.sh "$work/capture-engine"; fi
+packages=()
+for i in "${!editions[@]}"; do
+    edition=${editions[$i]}
+    product=${products[$i]}
+    name=${names[$i]}
     id="io.github.syedshad.shadtools.$edition"
     dir="$work/$edition-edition"
     app="$dir/root/$name.app"
     mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-    cp "$work/ShadTools" "$app/Contents/MacOS/ShadTools"
+    lipo -create "$work/$product-arm64" "$work/$product-x86_64" -output "$app/Contents/MacOS/ShadTools"
     cp "$work/Shad.icns" "$app/Contents/Resources/Shad.icns"
     cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -52,7 +77,6 @@ for edition in suite search audio drives color windows capture clipboard mouse; 
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>LSUIElement</key><true/>
 <key>NSHighResolutionCapable</key><true/>
-<key>NSAccessibilityUsageDescription</key><string>Shad Windows uses Accessibility to move and resize the windows you arrange.</string>
 <key>ShadEdition</key><string>$edition</string>
 </dict></plist>
 PLIST
@@ -66,9 +90,10 @@ PLIST
             ;;
     esac
     case "$edition" in
-        suite) /usr/bin/plutil -replace NSAccessibilityUsageDescription -string "Arrange windows, paste selected clipboard entries and run mouse shortcuts in the active app." "$app/Contents/Info.plist";;
-        mouse) /usr/bin/plutil -replace NSAccessibilityUsageDescription -string "Recognize your assigned mouse buttons and run the dial or gesture shortcut you select." "$app/Contents/Info.plist";;
-        clipboard) /usr/bin/plutil -replace NSAccessibilityUsageDescription -string "Paste the entry you select in Clipboard History into the active app." "$app/Contents/Info.plist";;
+        windows) /usr/bin/plutil -insert NSAccessibilityUsageDescription -string "Move and resize the windows you arrange." "$app/Contents/Info.plist";;
+        suite) /usr/bin/plutil -insert NSAccessibilityUsageDescription -string "Arrange windows, paste selected clipboard entries and run mouse shortcuts in the active app." "$app/Contents/Info.plist";;
+        mouse) /usr/bin/plutil -insert NSAccessibilityUsageDescription -string "Recognize your assigned mouse buttons and run the dial or gesture shortcut you select." "$app/Contents/Info.plist";;
+        clipboard) /usr/bin/plutil -insert NSAccessibilityUsageDescription -string "Paste the entry you select in Clipboard History into the active app." "$app/Contents/Info.plist";;
     esac
     sign_args=(--force --options runtime --sign "${APP_SIGN_IDENTITY:--}")
     if [[ -n "${APP_SIGN_IDENTITY:-}" ]]; then sign_args+=(--timestamp); fi
@@ -108,15 +133,24 @@ XML
         xcrun notarytool submit "$pkg" --keychain-profile "$NOTARY_PROFILE" --wait
         xcrun stapler staple "$pkg"
     fi
-    mv "$pkg" "$output/"
-    mkdir -p "$output/apps"
-    # Replace the whole bundle so a removed resource cannot survive an incremental build.
-    if [[ -e "$output/apps/$name.app" ]]; then
-        mv "$output/apps/$name.app" "$dir/previous.app"
-    fi
-    if ! mv "$app" "$output/apps/$name.app"; then
-        if [[ -e "$dir/previous.app" ]]; then mv "$dir/previous.app" "$output/apps/$name.app"; fi
-        exit 1
-    fi
+    mv "$pkg" "$staged/"
+    packages+=("$(basename "$pkg")")
+    mv "$app" "$staged/apps/"
 done
-(cd "$output" && shasum -a 256 "Shad-Tools-$version.pkg" "Shad-Search-$version.pkg" "Shad-Audio-$version.pkg" "Shad-Eject-$version.pkg" "Shad-Color-$version.pkg" "Shad-Windows-$version.pkg" "Shad-Capture-$version.pkg" "Shad-Clipboard-$version.pkg" "Shad-Mouse-$version.pkg" > "SHA256SUMS-$version.txt")
+manifest="SHA256SUMS-$version.txt"
+if [[ "$selection" != all ]]; then manifest="SHA256SUMS-$version-$selection.txt"; fi
+(cd "$staged" && shasum -a 256 "${packages[@]}" > "$manifest")
+./scripts/verify-packages.sh "$staged" "$selection"
+
+# Publish only once every requested product passes. Promote the checksum manifest last.
+mkdir -p "$output/apps" "$work/previous/apps"
+/usr/bin/shlock -p $$ -f "$output/.package.lock" || { echo "Another build is finalizing $output." >&2; exit 1; }
+lock="$output/.package.lock"
+paths=("${packages[@]}")
+for name in "${names[@]}"; do paths+=("apps/$name.app"); done
+paths+=("$manifest")
+for path in "${paths[@]}"; do
+    if [[ -e "$output/$path" ]]; then mv "$output/$path" "$work/previous/$path"; fi
+    promoted+=("$path")
+    mv "$staged/$path" "$output/$path"
+done

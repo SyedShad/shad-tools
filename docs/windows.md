@@ -26,6 +26,8 @@ Press **Control + Option + Command** with a left, right, up or down arrow to til
 
 Links work between standard, resizable windows visible on the current Space. App-defined minimum sizes, fixed-size dialogs and native full-screen mode can limit placement. Link state lasts until you detach the windows, disable magnetism or quit the app. Screen layouts and shortcut assignments are independent of these links.
 
+**Move to Next Display** and **Move to Previous Display** keep the window's position relative to the display edges and shrink it when necessary to fit a smaller screen. **Restore Window Size and Position** undoes the move. The suite and standalone share the magnetic toggle. When both run, one edition handles a drag.
+
 ## Design references
 
 The keyboard layouts follow conventions documented by Rectangle. The implementation uses macOS Accessibility window attributes. [Rectangle](https://github.com/rxhanson/Rectangle) · [Apple Accessibility APIs](https://developer.apple.com/documentation/applicationservices/axuielement_h)

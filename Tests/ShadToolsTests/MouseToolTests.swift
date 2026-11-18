@@ -2,7 +2,8 @@ import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
 import Testing
-@testable import ShadTools
+@testable import ShadCore
+@testable import ShadMouseFeature
 
 @Suite("Mouse shortcut dispatch")
 struct MouseToolTests {
@@ -25,8 +26,8 @@ struct MouseToolTests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let lock = directory.appendingPathComponent("capture.lock")
-        let suite = MouseCaptureLease(url: lock)
-        let standalone = MouseCaptureLease(url: lock)
+        let suite = FeatureLease(url: lock)
+        let standalone = FeatureLease(url: lock)
         #expect(suite.acquire())
         #expect(suite.acquire())
         #expect(!standalone.acquire())

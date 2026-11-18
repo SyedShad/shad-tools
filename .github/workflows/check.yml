@@ -1,0 +1,24 @@
+name: macOS checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-package:
+    runs-on: macos-26
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Test all features and the shell
+        run: ./scripts/test.sh
+      - name: Build universal preview installers
+        run: ./scripts/package.sh
+      - name: Verify each installer and its linked capabilities
+        run: ./scripts/verify-packages.sh

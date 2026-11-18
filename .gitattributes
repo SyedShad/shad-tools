@@ -1,0 +1,2 @@
+# A space at the start of a blank context line is significant in unified diffs.
+*.patch whitespace=-blank-at-eol

@@ -1,6 +1,8 @@
 import AppKit
 import Testing
-@testable import ShadTools
+@testable import ShadCore
+@testable import ShadColorFeature
+@testable import ShadColorValues
 
 @Suite("Color sampling")
 struct ColorTests {

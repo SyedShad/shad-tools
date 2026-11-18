@@ -1,6 +1,7 @@
 import CoreGraphics
 import Testing
-@testable import ShadTools
+@testable import ShadCore
+@testable import ShadWindowsFeature
 
 struct WindowGeometryTests {
     let display = CGRect(x: -1919, y: -109, width: 1919, height: 1033)
@@ -30,6 +31,19 @@ struct WindowGeometryTests {
         #expect(WindowGeometry.flip(ax, primaryTop: 900) == cocoa)
         #expect(WindowLayout.maximize.frame(on: display, current: primary) == display)
         #expect(WindowLayout.center.frame(on: display, current: sample).size == sample.size)
+    }
+
+    @Test func movingBetweenDisplaysPreservesAnchorsAndFitsSmallerScreens() {
+        let source = CGRect(x: 0, y: 0, width: 1440, height: 900)
+        let destination = CGRect(x: -1000, y: -100, width: 1000, height: 700)
+        let bottomRight = CGRect(x: 1040, y: 600, width: 400, height: 300)
+        #expect(WindowGeometry.move(bottomRight, from: source, to: destination) ==
+                CGRect(x: -400, y: 300, width: 400, height: 300))
+        #expect(WindowGeometry.move(source, from: source, to: destination) == destination)
+        let centered = CGRect(x: 520, y: 300, width: 400, height: 300)
+        let moved = WindowGeometry.move(centered, from: source, to: destination)
+        #expect(moved.midX == destination.midX && moved.midY == destination.midY)
+        #expect(moved.size == centered.size)
     }
 
     @Test func snapsAcrossOverlappingEdgesInBothDirections() {

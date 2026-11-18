@@ -2,7 +2,7 @@
 
 Open **Screen Capture** in Shad Tools or install **Shad Capture** on its own. The palette starts common tasks directly. For example, **Capture Area or Window** opens a frozen view of the desktop. Drag a rectangle to select a region, or hover over a window and click it. Use the annotation toolbar, then copy or save the image. Escape cancels.
 
-Shad includes the signed, full edition of MacShot 4.4.0. Its native editors, Studio and menu bar run as MacShot. Choose **Open MacShot**, then click its menu bar icon for additional actions such as **Record GIF**, delayed capture, **Open from Clipboard** and **Pin from Clipboard**. The first capture can prompt for MacShot's Screen Recording permission. On a Mac that already runs a compatible MacShot signed by its developer, the palette sends the command to that process. MacShot permits one instance per user and shares its existing preferences and history.
+Shad Capture Engine uses the MacShot 4.4.0 editors, Studio and menu bar. Choose **Open MacShot**, then click its menu bar icon for **Record GIF**, delayed capture, **Open from Clipboard** and **Pin from Clipboard**. macOS can ask for Screen Recording permission for Shad Capture Engine. The suite and standalone Capture use the same engine identity. If you previously used the upstream MacShot app or Shad 0.5.0, your earlier MacShot history and settings live in its original container. Use MacShot’s settings export and import to transfer preferences. Reauthorize upload accounts in the new engine.
 
 ## Feature guide
 
@@ -18,7 +18,7 @@ Shad includes the signed, full edition of MacShot 4.4.0. Its native editors, Stu
 | Record a clip or GIF | **Record Screen Area**, **Record Full Screen**, MacShot menu → **Record GIF** | Area or display, configurable frame rate, system audio, microphone, cursor/click effects and live drawing. End a MacShot take with **Stop Screen Recording** or the MacShot recording control. |
 | Edit a recording | Open the resulting clip in Studio or choose **Open Video in Studio** for an MP4, MOV or M4V | Timeline trimming, cuts, speed, freeze, titles, censor, pointer styling, zoom, background framing, editable webcam track, keystroke labels, waveform, captions, SRT, undo, autosave and export. Editable camera/pointer data requires a MacShot take that saved those tracks. |
 | Export or upload | Editor, Studio or thumbnail → Save, Copy or Upload | Image formats include PNG, JPEG, HEIC, WebP and AVIF. Studio exports video or GIF. MacShot includes Google Drive, imgbb and S3-compatible upload providers. Uploads use the selected provider and its credentials or hosting settings. |
-| Adjust capture behavior | **Capture Settings** | Configure capture and editor shortcuts, language, filenames and date folders, toolbar/menu behavior, capture feedback, output and recording preferences. Palette URL actions require **Enable macshot:// URL scheme** in MacShot Settings. |
+| Adjust capture behavior | **Capture Settings** | Configure capture and editor shortcuts, language, filenames and date folders, toolbar/menu behavior, capture feedback, output and recording preferences. Palette URL actions require **Enable shadcapture:// URL scheme** in Capture Settings. |
 
 These features come from the bundled MacShot release. The upstream feature and release guides describe the editor tools, keyboard shortcuts and version-specific options. [MacShot 4.4.0 feature guide](https://github.com/sw33tLie/macshot/blob/v4.4.0/README.md) · [Studio release notes](https://github.com/sw33tLie/macshot/releases/tag/v4.4.0) · [MacShot privacy policy](https://github.com/sw33tLie/macshot/blob/v4.4.0/PRIVACY.md)
 
@@ -30,6 +30,6 @@ macOS manages screen, camera and microphone permissions for the Shad app doing t
 
 ## Distribution
 
-The suite and the standalone Capture installer contain the same signed helper at `Contents/Helpers/macshot.app`. The other editions omit it. A Shad installer updates the bundled helper as part of the host app. The independent MacShot application can continue using its own update workflow. To build the packages from source, the packaging script obtains the pinned upstream disk image and source, verifies their SHA-256 digests and checks the original helper's Developer ID and universal binary.
+The suite and Shad Capture include the same sandboxed engine at `Contents/Helpers/macshot.app`. A new Shad installer updates the engine. External automation can use `shadcapture://` when URL actions are enabled in Capture Settings. The build verifies every source download and the upstream signature on the compiled artwork and translations. Each Capture package also contains the patched source and its WebP dependencies. [Build inputs and licenses](../ThirdParty/MacShot/NOTICE.md)
 
 The GPLv3 source snapshot and notices are included at `Contents/Resources/CaptureSources`. [Bundled licenses and sources](../ThirdParty/MacShot/NOTICE.md)

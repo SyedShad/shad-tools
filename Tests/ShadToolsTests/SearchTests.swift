@@ -1,6 +1,8 @@
 import Foundation
 import Testing
-@testable import ShadTools
+@testable import ShadCore
+@testable import ShadSearchFeature
+@testable import ShadShell
 
 @Suite("Launcher search")
 struct SearchTests {
@@ -49,10 +51,21 @@ struct SearchTests {
         let actual = root.appendingPathComponent("Utilities/Example.app", isDirectory: true)
         try manager.createDirectory(at: actual.appendingPathComponent("Contents/Helper.app"), withIntermediateDirectories: true)
         try manager.createSymbolicLink(at: root.appendingPathComponent("Example.app"), withDestinationURL: actual)
+        let impostor = root.appendingPathComponent("Document.app")
+        try Data().write(to: impostor)
+        #expect(SearchTool.itemAtPath(impostor.path)?.kind == .file)
         let found = ApplicationCatalog.scan(roots: [root, root])
         #expect(found.count == 1)
         #expect(found.first?.title == "Example")
         #expect(found.first?.url.resolvingSymlinksInPath() == actual.resolvingSymlinksInPath())
+    }
+
+    @Test @MainActor
+    func fileActionsComeFromTheSearchModule() {
+        let url = URL(fileURLWithPath: "/tmp/example.txt")
+        let result = SearchItem(url: url, title: "Example", kind: .file).command()
+        #expect(result.fileURL == url)
+        #expect(result.actions.map(\.id) == ["search.reveal", "search.preview", "search.copy-path"])
     }
 
     @Test

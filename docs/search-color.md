@@ -4,6 +4,8 @@
 
 Open the palette and type an app, command, filename, or folder name. Use the arrow keys to select a result and Return to open it. For example, `msg` finds Messages, `ss` finds System Settings, and a complete path such as `~/Downloads` opens that location in Finder. Commands can also match a tool name or an alias such as `eyedropper`.
 
+Press **⌘K** on a file result for **Quick Look**, **Show in Finder** or **Copy Path**.
+
 The app catalog covers Applications, System Applications, the system utilities, and your user Applications folder. It refreshes in the background as you use the launcher. App search works even when Spotlight indexing is disabled.
 
 File results appear after two characters. Shad Tools asks Spotlight for names in your home folder and displays up to 30 matches from the most recently modified candidates. Hidden directories, application bundle contents, `~/Library`, and `node_modules` are filtered from these results. Exact paths can open accessible items outside this scope. If a document never appears by name, check whether Spotlight indexes its folder in System Settings.

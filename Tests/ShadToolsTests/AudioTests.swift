@@ -1,7 +1,8 @@
 import CoreAudio
 import Foundation
 import Testing
-@testable import ShadTools
+@testable import ShadCore
+@testable import ShadAudioFeature
 
 private final class SimulatedAudio: AudioRouting {
     var connected: [RouteDevice]
