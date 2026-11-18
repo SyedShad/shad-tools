@@ -99,6 +99,7 @@ private final class CommandPanel: NSPanel {
     @objc private func menuSettings() { show(); model.showSettings() }
     private func openEdition() {
         if model.edition == .clipboard { model.clipboard?.showHistory() }
+        else if model.edition == .mouse { model.mouse?.showSettings() }
         else { show() }
     }
 

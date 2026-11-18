@@ -49,9 +49,11 @@ struct KeyChord: Codable, Equatable {
         case .windows: launcher = KeyChord(13, tri, "W")
         case .capture: launcher = KeyChord(35, tri, "P")
         case .clipboard: return ["clipboard.history": clipboard]
+        case .mouse: return ["mouse.dial": KeyChord(46, tri, "M")]
         }
         var bindings = ["app.open": launcher]
         if edition == .suite { bindings["clipboard.history"] = clipboard }
+        if edition == .suite { bindings["mouse.dial"] = KeyChord(46, tri, "M") }
         if edition == .suite || edition == .drives { bindings["drives.eject-all"] = KeyChord(14, tri, "E") }
         if edition == .suite || edition == .windows {
             for (id, code, key) in [("left", 123, "←"), ("right", 124, "→"), ("bottom", 125, "↓"), ("top", 126, "↑")] {

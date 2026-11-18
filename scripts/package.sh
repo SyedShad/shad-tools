@@ -2,7 +2,7 @@
 # Build independent macOS app bundles and product archives using Apple tools.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-version=${VERSION:-0.3.0}
+version=${VERSION:-0.4.0}
 case "$version" in *[!0-9.]*|'') echo 'VERSION must be numeric with dots' >&2; exit 2;; esac
 work=$(mktemp -d "${TMPDIR:-/tmp}/shad-pack.XXXXXX")
 trap 'rm -rf "$work"' EXIT
@@ -18,7 +18,7 @@ lipo -create "$work/arm64" "$work/x86_64" -output "$work/ShadTools"
 swift scripts/icon.swift "$work/Shad.iconset"
 iconutil -c icns "$work/Shad.iconset" -o "$work/Shad.icns"
 ./scripts/prepare-capture-engine.sh "$work/capture-engine"
-for edition in suite search audio drives color windows capture clipboard; do
+for edition in suite search audio drives color windows capture clipboard mouse; do
     case "$edition" in
         suite) name='Shad Tools';;
         search) name='Shad Search';;
@@ -28,6 +28,7 @@ for edition in suite search audio drives color windows capture clipboard; do
         windows) name='Shad Windows';;
         capture) name='Shad Capture';;
         clipboard) name='Shad Clipboard';;
+        mouse) name='Shad Mouse';;
     esac
     id="io.github.syedshad.shadtools.$edition"
     dir="$work/$edition-edition"
@@ -65,7 +66,8 @@ PLIST
             ;;
     esac
     case "$edition" in
-        suite) /usr/bin/plutil -replace NSAccessibilityUsageDescription -string "Arrange windows and paste a selected clipboard entry into the active app." "$app/Contents/Info.plist";;
+        suite) /usr/bin/plutil -replace NSAccessibilityUsageDescription -string "Arrange windows, paste selected clipboard entries and run mouse shortcuts in the active app." "$app/Contents/Info.plist";;
+        mouse) /usr/bin/plutil -replace NSAccessibilityUsageDescription -string "Recognize your assigned mouse buttons and run the dial or gesture shortcut you select." "$app/Contents/Info.plist";;
         clipboard) /usr/bin/plutil -replace NSAccessibilityUsageDescription -string "Paste the entry you select in Clipboard History into the active app." "$app/Contents/Info.plist";;
     esac
     sign_args=(--force --options runtime --sign "${APP_SIGN_IDENTITY:--}")
@@ -117,4 +119,4 @@ XML
         exit 1
     fi
 done
-(cd "$output" && shasum -a 256 "Shad-Tools-$version.pkg" "Shad-Search-$version.pkg" "Shad-Audio-$version.pkg" "Shad-Eject-$version.pkg" "Shad-Color-$version.pkg" "Shad-Windows-$version.pkg" "Shad-Capture-$version.pkg" "Shad-Clipboard-$version.pkg" > "SHA256SUMS-$version.txt")
+(cd "$output" && shasum -a 256 "Shad-Tools-$version.pkg" "Shad-Search-$version.pkg" "Shad-Audio-$version.pkg" "Shad-Eject-$version.pkg" "Shad-Color-$version.pkg" "Shad-Windows-$version.pkg" "Shad-Capture-$version.pkg" "Shad-Clipboard-$version.pkg" "Shad-Mouse-$version.pkg" > "SHA256SUMS-$version.txt")

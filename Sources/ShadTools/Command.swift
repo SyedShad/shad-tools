@@ -37,7 +37,7 @@ struct ToolCommand: Identifiable {
 }
 
 enum Edition: String, CaseIterable {
-    case suite, search, audio, drives, color, windows, capture, clipboard
+    case suite, search, audio, drives, color, windows, capture, clipboard, mouse
     static var current: Edition {
         let key = Bundle.main.object(forInfoDictionaryKey: "ShadEdition") as? String
         return Edition(rawValue: key ?? "suite") ?? .suite
@@ -52,6 +52,7 @@ enum Edition: String, CaseIterable {
         case .windows: return "Shad Windows"
         case .capture: return "Shad Capture"
         case .clipboard: return "Shad Clipboard"
+        case .mouse: return "Shad Mouse"
         }
     }
     var group: String {
@@ -64,6 +65,7 @@ enum Edition: String, CaseIterable {
         case .windows: return "Windows"
         case .capture: return "Capture"
         case .clipboard: return "Clipboard"
+        case .mouse: return "Mouse"
         }
     }
     var category: String {
@@ -76,6 +78,7 @@ enum Edition: String, CaseIterable {
         case .windows: return "Window Layouts"
         case .capture: return "Screen Capture"
         case .clipboard: return "Clipboard History"
+        case .mouse: return "Mouse Tools"
         }
     }
     var detail: String {
@@ -88,6 +91,7 @@ enum Edition: String, CaseIterable {
         case .windows: return "Tile windows and link their edges"
         case .capture: return "Take screenshots and record your screen with a camera overlay"
         case .clipboard: return "Find and paste previously copied text and images"
+        case .mouse: return "Open a shortcut dial or run a directional gesture"
         }
     }
     var symbol: String {
@@ -100,6 +104,7 @@ enum Edition: String, CaseIterable {
         case .windows: return "rectangle.split.2x1"
         case .capture: return "camera.viewfinder"
         case .clipboard: return "list.clipboard"
+        case .mouse: return "computermouse.fill"
         }
     }
     var includesSearch: Bool { self == .suite || self == .search }

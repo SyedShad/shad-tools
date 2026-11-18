@@ -1,32 +1,34 @@
 # Shad Tools
 
-A keyboard-first toolbox for macOS. One palette finds apps and files, ranks audio devices, ejects drives, samples colors, arranges windows, captures screenshots or recordings, and recalls copied text and images. Use **⌘K** on a result to see its actions. Shad Tools runs locally. Capture uploads are optional.
+A keyboard-first toolbox for macOS. One palette finds apps and files, ranks audio devices, ejects drives, samples colors, arranges windows, captures screenshots or recordings, recalls copied text and images, and maps mouse buttons to a shortcut dial and gestures. Use **⌘K** on a result to see its actions. Shad Tools runs locally. Capture uploads are optional.
 
 ![Shad Tools in dark mode with tool categories and keyboard actions](docs/palette-dark.jpg)
 
 ## Install
 
-Download the **Shad Tools** package for the complete palette, or pick one of the seven standalone installers. Each installer contains a self-contained application for Apple silicon and Intel Macs targeting macOS 13 or later. Open the installed app from Applications. [Download version 0.3.0](https://github.com/SyedShad/shad-tools/releases/tag/v0.3.0)
+Download the **Shad Tools** package for the complete palette, or pick one of the eight standalone installers. Each installer contains a self-contained application for Apple silicon and Intel Macs targeting macOS 13 or later. Open the installed app from Applications. [Download version 0.4.0](https://github.com/SyedShad/shad-tools/releases/tag/v0.4.0)
 
-| Installer | What it does | Open the palette |
+| Installer | What it does | Default shortcut |
 | --- | --- | --- |
-| [Shad Tools](https://github.com/SyedShad/shad-tools/releases/download/v0.3.0/Shad-Tools-0.3.0.pkg) | All seven tools in one menu bar app | ⌃⌥Space |
-| [Shad Search](https://github.com/SyedShad/shad-tools/releases/download/v0.3.0/Shad-Search-0.3.0.pkg) | Search apps, commands, filenames, and paths | ⌃⌥⌘S |
-| [Shad Audio](https://github.com/SyedShad/shad-tools/releases/download/v0.3.0/Shad-Audio-0.3.0.pkg) | Rank microphones and playback devices independently | ⌃⌥⌘A |
-| [Shad Eject](https://github.com/SyedShad/shad-tools/releases/download/v0.3.0/Shad-Eject-0.3.0.pkg) | Safely eject one physical drive or all eligible drives | ⌃⌥⌘D |
-| [Shad Color](https://github.com/SyedShad/shad-tools/releases/download/v0.3.0/Shad-Color-0.3.0.pkg) | Sample a pixel and copy HEX, RGB, or HSL | ⌃⌥⌘C |
-| [Shad Windows](https://github.com/SyedShad/shad-tools/releases/download/v0.3.0/Shad-Windows-0.3.0.pkg) | Tile windows, snap adjacent edges, and resize linked windows | ⌃⌥⌘W |
-| [Shad Capture](https://github.com/SyedShad/shad-tools/releases/download/v0.3.0/Shad-Capture-0.3.0.pkg) | Screenshots, annotations, Studio, and screen recordings with a camera overlay | ⌃⌥⌘P |
-| [Shad Clipboard](https://github.com/SyedShad/shad-tools/releases/download/v0.3.0/Shad-Clipboard-0.3.0.pkg) | Search, preview and paste copied text and images | ⌃⌥⌘V |
+| [Shad Tools](https://github.com/SyedShad/shad-tools/releases/download/v0.4.0/Shad-Tools-0.4.0.pkg) | All eight tools in one menu bar app | ⌃⌥Space |
+| [Shad Search](https://github.com/SyedShad/shad-tools/releases/download/v0.4.0/Shad-Search-0.4.0.pkg) | Search apps, commands, filenames, and paths | ⌃⌥⌘S |
+| [Shad Audio](https://github.com/SyedShad/shad-tools/releases/download/v0.4.0/Shad-Audio-0.4.0.pkg) | Rank microphones and playback devices independently | ⌃⌥⌘A |
+| [Shad Eject](https://github.com/SyedShad/shad-tools/releases/download/v0.4.0/Shad-Eject-0.4.0.pkg) | Safely eject one physical drive or all eligible drives | ⌃⌥⌘D |
+| [Shad Color](https://github.com/SyedShad/shad-tools/releases/download/v0.4.0/Shad-Color-0.4.0.pkg) | Sample a pixel and copy HEX, RGB, or HSL | ⌃⌥⌘C |
+| [Shad Windows](https://github.com/SyedShad/shad-tools/releases/download/v0.4.0/Shad-Windows-0.4.0.pkg) | Tile windows, snap adjacent edges, and resize linked windows | ⌃⌥⌘W |
+| [Shad Capture](https://github.com/SyedShad/shad-tools/releases/download/v0.4.0/Shad-Capture-0.4.0.pkg) | Screenshots, annotations, Studio, and screen recordings with a camera overlay | ⌃⌥⌘P |
+| [Shad Clipboard](https://github.com/SyedShad/shad-tools/releases/download/v0.4.0/Shad-Clipboard-0.4.0.pkg) | Search, preview and paste copied text and images | ⌃⌥⌘V |
+| [Shad Mouse](https://github.com/SyedShad/shad-tools/releases/download/v0.4.0/Shad-Mouse-0.4.0.pkg) | Eight-slot dial, app-specific shortcuts and four directional gestures | ⌃⌥⌘M |
 
-Version 0.3.0 is a public preview. The apps are ad hoc signed. The installers are unsigned and have no Apple notarization ticket, so Gatekeeper may stop a downloaded package. Apple's guide explains the alert and the per-item approval option available on some Macs. You can also build the tagged source below. [Apple’s guide to opening downloaded software](https://support.apple.com/en-us/102445)
+Version 0.4.0 is a public preview. The apps are ad hoc signed. The installers are unsigned and have no Apple notarization ticket, so Gatekeeper may stop a downloaded package. Apple's guide explains the alert and the per-item approval option available on some Macs. You can also build the tagged source below. [Apple’s guide to opening downloaded software](https://support.apple.com/en-us/102445)
 
-To verify a single download, run `shasum -a 256` followed by the path to the package and compare the result with the line for that filename in the [release checksum manifest](https://github.com/SyedShad/shad-tools/releases/download/v0.3.0/SHA256SUMS-0.3.0.txt).
+To verify a single download, run `shasum -a 256` followed by the path to the package and compare the result with the line for that filename in the [release checksum manifest](https://github.com/SyedShad/shad-tools/releases/download/v0.4.0/SHA256SUMS-0.4.0.txt).
 
 ## First use
 
 - Press **Control + Option + Space** or click the suite’s menu bar icon. Type to search across tools, or open a category to browse its commands. Use **↑**, **↓**, and **Return**. **Escape** clears the query, goes back, or closes the palette.
 - Press **Control + Option + Command + V** in any app to open **Clipboard History**. Type to search, use **↑** or **↓** to preview an item, then press **Return** to paste it into the app you were using. **⌘Return** copies the item for manual pasting. Change the shortcut in Shad’s keyboard settings. [Clipboard history guide](docs/clipboard.md)
+- Open **Mouse Tools → Configure Mouse Tools** and enable mouse input. With the default binding, tap the middle button to open the dial or hold it, move up, down, left or right, and release to run a gesture. The four left dial actions stay the same across apps. The four right actions follow the foreground app. [Mouse setup and dial preview](docs/mouse.md)
 - Open **Audio Manager → Manage Input Priorities**. Put the MacBook microphone above the headset microphone. Under **Manage Output Priorities**, put the headset above the speakers. Shad uses the highest connected device on each list and restores it if macOS changes the default. [Audio priority guide](docs/hardware.md)
 - Open **Screen Capture** for region, window, display, scrolling, OCR and recording commands. **Record Screen with Camera** places your camera over a display or window and saves the result as MP4. You can change its size, position, shape, or background. [Capture and Studio](docs/capture.md) · [Presenter recording](docs/camera.md)
 - Press **Control + Option + Command + E** to eject eligible external drives. Wait for the result before unplugging. For one specific drive, select its command and press **⌘K → Set Keyboard Shortcut**. [Drive behavior and busy disks](docs/hardware.md#leave-with-your-drives)
@@ -39,7 +41,7 @@ To verify a single download, run `shasum -a 256` followed by the path to the pac
 On macOS with recent Xcode or Command Line Tools and Swift 6 or newer:
 
 ```sh
-git clone --branch v0.3.0 https://github.com/SyedShad/shad-tools.git
+git clone --branch v0.4.0 https://github.com/SyedShad/shad-tools.git
 cd shad-tools
 ./scripts/test.sh
 ./scripts/package.sh
@@ -47,9 +49,9 @@ cd shad-tools
 open "dist/apps/Shad Tools.app"
 ```
 
-The release script creates eight universal installers, app bundles, and a SHA-256 manifest in `dist/`. Each edition has its own bundle ID and initializes only its own tools. Shad Audio and the suite share device rankings. The release script downloads and verifies the pinned MacShot engine and its sources for the Capture and suite editions. Those two packages work without a separate MacShot installation.
+The release script creates nine universal installers, app bundles, and a SHA-256 manifest in `dist/`. Each edition has its own bundle ID and initializes only its own tools. Shad Audio and the suite share device rankings. The release script downloads and verifies the pinned MacShot engine and its sources for the Capture and suite editions. Those two packages work without a separate MacShot installation.
 
-To check downloaded packages, place all eight and the manifest in one directory and run `shasum -a 256 -c SHA256SUMS-0.3.0.txt` there. Maintainers can set `APP_SIGN_IDENTITY`, `INSTALLER_SIGN_IDENTITY`, and `NOTARY_PROFILE` when running the release script with their own Developer ID certificates and notarytool keychain profile.
+To check downloaded packages, place all nine and the manifest in one directory and run `shasum -a 256 -c SHA256SUMS-0.4.0.txt` there. Maintainers can set `APP_SIGN_IDENTITY`, `INSTALLER_SIGN_IDENTITY`, and `NOTARY_PROFILE` when running the release script with their own Developer ID certificates and notarytool keychain profile.
 
 ## Project
 
