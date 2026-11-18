@@ -68,7 +68,7 @@ private final class CommandPanel: NSPanel {
         }
         let launchEvent = NSAppleEventManager.shared().currentAppleEvent
         let atLogin = launchEvent?.paramDescriptor(forKeyword: AEKeyword(keyAEPropData))?.enumCodeValue == OSType(keyAELaunchedAsLogInItem)
-        if !atLogin { show() }
+        if !atLogin { openEdition() }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -76,7 +76,7 @@ private final class CommandPanel: NSPanel {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if panel != nil { show() }
+        if panel != nil { openEdition() }
         return true
     }
 
@@ -95,9 +95,14 @@ private final class CommandPanel: NSPanel {
         } else { toggle() }
     }
 
-    @objc private func menuOpen() { show() }
+    @objc private func menuOpen() { openEdition() }
     @objc private func menuSettings() { show(); model.showSettings() }
-    private func toggle() { panel.isVisible ? hide() : show() }
+    private func openEdition() {
+        if model.edition == .clipboard { model.clipboard?.showHistory() }
+        else { show() }
+    }
+
+    private func toggle() { panel.isVisible ? hide() : openEdition() }
     private func show() {
         TargetApplication.capture()
         model.reset()

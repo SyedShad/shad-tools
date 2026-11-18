@@ -11,6 +11,7 @@ import SwiftUI
     let color: ColorTool?
     let windows: WindowTool?
     let capture: CaptureTool?
+    let clipboard: ClipboardTool?
     @Published var query = "" { didSet { if oldValue != query { refresh(keepSelection: false) } } }
     @Published var scope: Edition?
     @Published var rows = [ToolCommand]()
@@ -51,6 +52,7 @@ import SwiftUI
         color = [.suite, .color].contains(edition) ? ColorTool() : nil
         windows = [.suite, .windows].contains(edition) ? WindowTool() : nil
         capture = [.suite, .capture].contains(edition) ? CaptureTool() : nil
+        clipboard = [.suite, .clipboard].contains(edition) ? ClipboardTool() : nil
         recent = preferences.stringArray(forKey: "recentCommands") ?? []
         scope = edition == .suite ? nil : edition
         rebuild()
@@ -65,7 +67,7 @@ import SwiftUI
     }
 
     private var categories: [ToolCommand] {
-        Edition.allCases.filter { $0 != .suite }.map { item in
+        Edition.allCases.filter { $0 != .suite && $0 != .clipboard }.map { item in
             ToolCommand(id: "group." + item.rawValue, title: item.category, subtitle: item.detail, symbol: item.symbol, group: item.group) { [weak self] in
                 self?.selectScope(item)
             }
@@ -78,6 +80,7 @@ import SwiftUI
         catalog += color?.commands() ?? []
         catalog += windows?.commands() ?? []
         catalog += capture?.commands() ?? []
+        catalog += clipboard?.commands() ?? []
         shortcuts.reconcile(Set(catalog.map(\.id)).union(["app.open"]))
         refresh()
     }
@@ -93,10 +96,12 @@ import SwiftUI
             let offline = shortcuts.savedNames.filter { !active.contains($0.key) }.sorted { $0.value < $1.value }.map { id, name in
                 ToolCommand(id: id, title: name, subtitle: "Unavailable · Edit or remove its saved shortcut", symbol: "keyboard", group: "Settings", perform: {})
             }
-            found = rankedCommands([launcher] + catalog + offline, query: query)
+            let launchers = edition == .clipboard ? [] : [launcher]
+            found = rankedCommands(launchers + catalog + offline, query: query)
         } else if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             _ = search?.results(for: "")
-            let tools = scope == nil ? categories : []
+            // Clipboard History opens its own browser directly from the Tools section.
+            let tools = scope == nil ? categories + catalog.filter { $0.id == "clipboard.history" } : []
             let commands = catalog.filter { scope == nil || $0.group == scope?.group }
             let available = tools + commands
             let byID = Dictionary(available.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })

@@ -3,11 +3,23 @@ import Testing
 @testable import ShadTools
 
 @Test func independentLaunchersCanRunTogether() {
-    let keys = Edition.allCases.compactMap { KeyChord.defaults($0)["app.open"] }
+    let keys = Edition.allCases.compactMap { KeyChord.defaults($0)[$0 == .clipboard ? "clipboard.history" : "app.open"] }
     #expect(keys.count == Edition.allCases.count)
     #expect(KeyChord.defaults(.capture)["app.open"]?.label == "⌃⌥⌘P")
     for (index, key) in keys.enumerated() {
         #expect(!keys.dropFirst(index + 1).contains(where: key.matches))
+    }
+}
+
+@Test func clipboardShortcutOpensHistoryInBothClipboardEditions() {
+    for edition in Edition.allCases {
+        let keys = KeyChord.defaults(edition)
+        let history = keys["clipboard.history"]
+        #expect((history != nil) == (edition == .suite || edition == .clipboard))
+        if let history {
+            #expect(history.label == "⌃⌥⌘V")
+            #expect(keys.filter { $0.key != "clipboard.history" }.values.allSatisfy { !history.matches($0) })
+        }
     }
 }
 

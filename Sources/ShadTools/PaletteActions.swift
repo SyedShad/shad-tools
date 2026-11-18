@@ -20,7 +20,7 @@ extension ToolCommand {
         return nil
     }
     var kind: String {
-        if id.hasPrefix("group.") { return "Tool" }
+        if id.hasPrefix("group.") || id == "clipboard.history" { return "Tool" }
         if id.hasPrefix("search.app.") { return "Application" }
         if id.hasPrefix("search.file.") { return symbol == "folder" ? "Folder" : "File" }
         return "Command"

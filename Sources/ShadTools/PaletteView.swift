@@ -92,6 +92,7 @@ private struct CommandIcon: View {
         case "Color": return Color(red: 0.94, green: 0.29, blue: 0.54)
         case "Windows": return Color(red: 0.15, green: 0.67, blue: 0.76)
         case "Capture": return Color(red: 0.94, green: 0.29, blue: 0.34)
+        case "Clipboard": return Color(red: 0.18, green: 0.64, blue: 0.46)
         default: return .gray
         }
     }

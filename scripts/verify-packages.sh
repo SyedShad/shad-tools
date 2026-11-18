@@ -3,7 +3,7 @@
 set -euo pipefail
 export LC_ALL=C
 cd "$(dirname "$0")/.."
-version=${VERSION:-0.2.0}
+version=${VERSION:-0.3.0}
 case "$version" in ''|*[!0-9.]*) echo 'VERSION must contain digits and dots' >&2; exit 2;; esac
 output=$(cd "${1:-dist}" && pwd)
 work=$(mktemp -d "${TMPDIR:-/tmp}/shad-verify.XXXXXX")
@@ -14,8 +14,8 @@ equal() { [[ "$1" == "$2" ]] || fail "$3 (expected '$2', found '$1')"; }
 xml_value() { /usr/bin/xmllint --nonet --xpath "$1" "$2"; }
 plist_value() { /usr/bin/plutil -extract "$1" raw -o - "$2"; }
 
-names=('Shad Tools' 'Shad Search' 'Shad Audio' 'Shad Eject' 'Shad Color' 'Shad Windows' 'Shad Capture')
-editions=(suite search audio drives color windows capture)
+names=('Shad Tools' 'Shad Search' 'Shad Audio' 'Shad Eject' 'Shad Color' 'Shad Windows' 'Shad Capture' 'Shad Clipboard')
+editions=(suite search audio drives color windows capture clipboard)
 packages=()
 for name in "${names[@]}"; do packages+=("${name// /-}-$version.pkg"); done
 manifest="$output/SHA256SUMS-$version.txt"
