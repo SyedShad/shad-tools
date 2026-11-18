@@ -8,14 +8,16 @@ Download the **Shad Tools** package for the complete palette, or pick one of the
 
 | Installer | What it does | Open the palette |
 | --- | --- | --- |
-| **Shad Tools** | All five tools in one menu bar app | ⌃⌥Space |
-| **Shad Search** | Search apps, commands, filenames, and paths | ⌃⌥⌘S |
-| **Shad Audio** | Pin system input and output independently | ⌃⌥⌘A |
-| **Shad Eject** | Safely eject one physical drive or all eligible drives | ⌃⌥⌘D |
-| **Shad Color** | Sample a pixel and copy HEX, RGB, or HSL | ⌃⌥⌘C |
-| **Shad Windows** | Tile windows, snap adjacent edges, and resize linked windows | ⌃⌥⌘W |
+| [Shad Tools](https://github.com/SyedShad/shad-tools/releases/download/v0.1.0/Shad-Tools-0.1.0.pkg) | All five tools in one menu bar app | ⌃⌥Space |
+| [Shad Search](https://github.com/SyedShad/shad-tools/releases/download/v0.1.0/Shad-Search-0.1.0.pkg) | Search apps, commands, filenames, and paths | ⌃⌥⌘S |
+| [Shad Audio](https://github.com/SyedShad/shad-tools/releases/download/v0.1.0/Shad-Audio-0.1.0.pkg) | Pin system input and output independently | ⌃⌥⌘A |
+| [Shad Eject](https://github.com/SyedShad/shad-tools/releases/download/v0.1.0/Shad-Eject-0.1.0.pkg) | Safely eject one physical drive or all eligible drives | ⌃⌥⌘D |
+| [Shad Color](https://github.com/SyedShad/shad-tools/releases/download/v0.1.0/Shad-Color-0.1.0.pkg) | Sample a pixel and copy HEX, RGB, or HSL | ⌃⌥⌘C |
+| [Shad Windows](https://github.com/SyedShad/shad-tools/releases/download/v0.1.0/Shad-Windows-0.1.0.pkg) | Tile windows, snap adjacent edges, and resize linked windows | ⌃⌥⌘W |
 
-Version 0.1.0 is a public preview. The apps use ad hoc code signatures. The installer packages are unsigned and have no Apple notarization ticket. Gatekeeper may block an internet download. A local source build is available below. Apple describes its installer verification and approval controls in its [Mac software distribution guide](https://developer.apple.com/macos/distribution/).
+Version 0.1.0 is a public preview. The apps are ad hoc signed. The installers are unsigned and have no Apple notarization ticket, so Gatekeeper may stop a downloaded package. Apple's guide explains the alert and the per-item approval option available on some Macs. You can also build the tagged source below. [Apple’s guide to opening downloaded software](https://support.apple.com/en-us/102445)
+
+To verify a single download, run `shasum -a 256` followed by the path to the package and compare the result with the line for that filename in the [release checksum manifest](https://github.com/SyedShad/shad-tools/releases/download/v0.1.0/SHA256SUMS-0.1.0.txt).
 
 ## First use
 
@@ -31,7 +33,7 @@ Version 0.1.0 is a public preview. The apps use ad hoc code signatures. The inst
 On macOS with recent Xcode or Command Line Tools and Swift 6 or newer:
 
 ```sh
-git clone https://github.com/SyedShad/shad-tools.git
+git clone --branch v0.1.0 https://github.com/SyedShad/shad-tools.git
 cd shad-tools
 ./scripts/test.sh
 ./scripts/package.sh
