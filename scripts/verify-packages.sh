@@ -3,7 +3,7 @@
 set -euo pipefail
 export LC_ALL=C
 cd "$(dirname "$0")/.."
-version=${VERSION:-0.1.0}
+version=${VERSION:-0.2.0}
 case "$version" in ''|*[!0-9.]*) echo 'VERSION must contain digits and dots' >&2; exit 2;; esac
 output=$(cd "${1:-dist}" && pwd)
 work=$(mktemp -d "${TMPDIR:-/tmp}/shad-verify.XXXXXX")
@@ -14,8 +14,8 @@ equal() { [[ "$1" == "$2" ]] || fail "$3 (expected '$2', found '$1')"; }
 xml_value() { /usr/bin/xmllint --nonet --xpath "$1" "$2"; }
 plist_value() { /usr/bin/plutil -extract "$1" raw -o - "$2"; }
 
-names=('Shad Tools' 'Shad Search' 'Shad Audio' 'Shad Eject' 'Shad Color' 'Shad Windows')
-editions=(suite search audio drives color windows)
+names=('Shad Tools' 'Shad Search' 'Shad Audio' 'Shad Eject' 'Shad Color' 'Shad Windows' 'Shad Capture')
+editions=(suite search audio drives color windows capture)
 packages=()
 for name in "${names[@]}"; do packages+=("${name// /-}-$version.pkg"); done
 manifest="$output/SHA256SUMS-$version.txt"
@@ -54,6 +54,7 @@ for i in "${!editions[@]}"; do
     equal "$(xml_value 'string(/pkg-info/@install-location)' "$metadata")" /Applications "$name install location"
     equal "$(xml_value 'string(/pkg-info/@version)' "$metadata")" "$version" "$name package version"
     equal "$(xml_value 'count(/pkg-info/scripts/*)' "$metadata")" 0 "$name install scripts"
+    equal "$(xml_value 'count(/pkg-info/relocate/bundle)' "$metadata")" 0 "$name relocatable bundles"
     /usr/bin/plutil -lint "$plist" >/dev/null
     equal "$(plist_value CFBundleIdentifier "$plist")" "$id" "$name bundle identifier"
     equal "$(plist_value ShadEdition "$plist")" "$edition" "$name feature selection"
@@ -73,6 +74,30 @@ for i in "${!editions[@]}"; do
     dependencies=$(/usr/bin/otool -arch all -L "$binary" | awk '/compatibility version/ && $1 !~ /^\/(usr\/lib|System\/Library)\// {print $1}')
     [[ -z "$dependencies" ]] || fail "$name references an external runtime ($dependencies)"
     /usr/bin/codesign --verify --strict --all-architectures "$app" || fail "$name app signature"
+    case "$edition" in
+        suite|capture)
+            helper="$app/Contents/Helpers/macshot.app"
+            equal "$(plist_value CFBundleIdentifier "$helper/Contents/Info.plist")" com.sw33tlie.macshot.macshot "$name capture engine"
+            equal "$(plist_value CFBundleShortVersionString "$helper/Contents/Info.plist")" 4.4.0 "$name capture engine version"
+            requirement='anchor apple generic and identifier "com.sw33tlie.macshot.macshot" and certificate leaf[subject.OU] = "J4XGH8RFS8"'
+            /usr/bin/codesign --verify --deep --strict --all-architectures -R="$requirement" "$helper" || fail "$name bundled engine signature"
+            sources="$app/Contents/Resources/CaptureSources"
+            [[ -s "$sources/COPYING" && -s "$sources/NOTICE.md" ]] || fail "$name capture engine licenses"
+            tar -tzf "$sources/macshot-4.4.0-source.tar.gz" > "$work/archive-files"
+            grep -q '/macshot/AppDelegate.swift$' "$work/archive-files" || fail "$name capture engine implementation"
+            grep -q '/macshot.xcodeproj/project.pbxproj$' "$work/archive-files" || fail "$name capture engine Xcode project"
+            /usr/bin/codesign -d --entitlements - --xml "$app" 2>/dev/null > "$work/entitlements.plist"
+            for entitlement in com.apple.security.device.camera com.apple.security.device.audio-input; do
+                [[ "$(/usr/libexec/PlistBuddy -c "Print :$entitlement" "$work/entitlements.plist")" == true ]] || fail "$name $entitlement"
+            done
+            for key in NSCameraUsageDescription NSMicrophoneUsageDescription; do
+                [[ -n "$(plist_value "$key" "$plist")" ]] || fail "$name $key"
+            done
+            ;;
+        *)
+            [[ ! -e "$app/Contents/Helpers/macshot.app" ]] || fail "unexpected capture engine in $name"
+            ;;
+    esac
     app_signature=$(/usr/bin/codesign -dvv "$app" 2>&1)
     if [[ "$app_signature" == *"Signature=adhoc"* ]]; then app_signing='ad hoc'
     elif [[ "$app_signature" == *"Authority=Developer ID Application:"* ]]; then app_signing='Developer ID'

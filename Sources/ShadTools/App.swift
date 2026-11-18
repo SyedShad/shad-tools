@@ -19,6 +19,8 @@ private final class CommandPanel: NSPanel {
         let edition = Edition.current
         TargetApplication.capture()
         model = PaletteModel(edition)
+        model.applyAppearance = { [weak self] in NSApp.appearance = self?.model.appearance.appKitAppearance }
+        model.applyAppearance?()
         model.open = { [weak self] in self?.toggle() }
         model.dismiss = { [weak self] in self?.hide() }
         model.shortcuts.fire = { [weak self] id in
@@ -33,7 +35,7 @@ private final class CommandPanel: NSPanel {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.04, execute: work)
         }
         Feedback.present = { [weak self] in self?.message($0) }
-        let size = NSSize(width: 660, height: 460)
+        let size = NSSize(width: 824, height: 522)
         let p = CommandPanel(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         p.title = edition.title
         p.setAccessibilityLabel(edition.title)
@@ -69,6 +71,10 @@ private final class CommandPanel: NSPanel {
         if !atLogin { show() }
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        CameraRecorderWindow.shared.applicationShouldTerminate()
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if panel != nil { show() }
         return true
@@ -98,7 +104,7 @@ private final class CommandPanel: NSPanel {
         let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main
         if let screen {
             let frame = screen.visibleFrame
-            let size = NSSize(width: min(660, frame.width - 24), height: min(460, frame.height - 28))
+            let size = NSSize(width: min(824, frame.width - 24), height: min(522, frame.height - 28))
             panel.setFrame(NSRect(x: frame.midX - size.width / 2, y: frame.minY + (frame.height - size.height) * 0.62, width: size.width, height: size.height), display: true)
         }
         panel.makeKeyAndOrderFront(nil)
@@ -128,10 +134,16 @@ private final class CommandPanel: NSPanel {
             else { model.note = "Include Control, Option or Command in the shortcut." }
             return true
         }
+        if (panel.firstResponder as? NSTextView)?.hasMarkedText() == true { return false }
         if event.modifierFlags.contains(.command) {
+            switch event.keyCode {
+            case 125, 126: model.nextSection(forward: event.keyCode == 125); return true
+            case 36, 76: model.secondaryAction(); return true
+            default: break
+            }
             switch event.charactersIgnoringModifiers?.lowercased() {
             case ",": model.showSettings()
-            case "k": if let current = model.current { model.record(current) }
+            case "k": model.toggleActions()
             case "q": NSApp.terminate(nil)
             case "v", "x", "c", "a":
                 let selector = ["v": "paste:", "x": "cut:", "c": "copy:", "a": "selectAll:"][event.charactersIgnoringModifiers!.lowercased()]!
@@ -140,13 +152,21 @@ private final class CommandPanel: NSPanel {
             }
             return true
         }
-        if (panel.firstResponder as? NSTextView)?.hasMarkedText() == true { return false }
+        if event.modifierFlags.contains(.control) {
+            switch event.charactersIgnoringModifiers?.lowercased() {
+            case "n": model.move(1); return true
+            case "p": model.move(-1); return true
+            default: return false
+            }
+        }
         switch event.keyCode {
-        case 126: model.move(-1)
-        case 125: model.move(1)
-        case 36, 76: if let current = model.current { model.execute(current) }
+        case 126: model.move(event.modifierFlags.contains(.option) ? -9 : -1)
+        case 125: model.move(event.modifierFlags.contains(.option) ? 9 : 1)
+        case 36, 76: model.confirmSelection()
+        case 48 where model.canJumpToCapture && model.actionTarget == nil && event.modifierFlags.intersection([.control, .option, .command, .shift]).isEmpty:
+            model.selectScope(.capture)
         case 53: model.back()
-        case 51 where model.query.isEmpty && model.scope != nil && model.edition == .suite: model.back()
+        case 51 where model.actionTarget == nil && model.query.isEmpty && model.scope != nil && model.edition == .suite: model.back()
         default: return false
         }
         return true

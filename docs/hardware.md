@@ -1,12 +1,14 @@
 # Audio and external drives
 
-## Keep a microphone selected
+## Rank your microphones and speakers
 
-Open **Audio Manager** and choose **Pin Input to** your preferred microphone. Leave the output unpinned if you want the Mac to route playback to newly connected headphones. To keep playback on a particular device too, choose **Pin Output to** that device.
+Open **Audio Manager → Manage Input Priorities** or **Manage Output Priorities**. Each list is independent. Use the arrow buttons to move a device up or down, or use **Make First** to put it at the top. The first connected device that supports that direction becomes the system default. Devices keep their positions while disconnected. A newly discovered device joins the bottom of its list.
 
-The app listens for Core Audio device and default-route changes while it runs. When macOS changes a pinned route, the app restores it. macOS can briefly select a different device while a headset connects. Apps with their own microphone or speaker selection may continue to use that specific device. Choose the system default in those apps if you want them to follow the pin.
+For example, put your MacBook microphone above your headset under **Input**, then put the headset above your MacBook speakers under **Output**. Connecting the headset sends playback to it while the MacBook microphone keeps handling input. If the headset disconnects, the next available output takes over. Reconnecting restores the higher-ranked output.
 
-A disconnected pin stays saved. macOS can use an available device until the preferred device returns. **Unpin Audio Input** and **Unpin Audio Output** restore automatic selection for their respective routes. The suite and standalone audio app share these preferences. Device identifiers and names stay on your Mac.
+On first launch each list starts with the current system default. An existing Shad Audio pin becomes the first-ranked device when upgrading. The suite and standalone audio app share rankings. Turn off **Use input priorities** or **Use output priorities** to give macOS control of that direction while keeping the saved order. You can also reorder disconnected devices or forget one from its context menu.
+
+Keep Shad Tools or Shad Audio running for automatic switching. Core Audio reports connections and default changes, and Shad reapplies the winning route when macOS or another app changes it. The hardware can switch briefly during a connection. An app with an explicitly selected device follows its own setting. Choose the system default in that app to follow your ranking.
 
 ## Leave with your drives
 

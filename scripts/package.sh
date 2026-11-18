@@ -2,14 +2,14 @@
 # Build independent macOS app bundles and product archives using Apple tools.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-version=${VERSION:-0.1.0}
+version=${VERSION:-0.2.0}
 case "$version" in *[!0-9.]*|'') echo 'VERSION must be numeric with dots' >&2; exit 2;; esac
 work=$(mktemp -d "${TMPDIR:-/tmp}/shad-pack.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 output="$PWD/dist"
 mkdir -p "$output"
 for arch in arm64 x86_64; do
-    options=(-c release --triple "$arch-apple-macosx13.0")
+    options=(--scratch-path ".build/package-$arch" -c release --triple "$arch-apple-macosx13.0")
     swift build "${options[@]}" --product ShadTools
     bindir=$(swift build "${options[@]}" --show-bin-path)
     cp "$bindir/ShadTools" "$work/$arch"
@@ -17,7 +17,8 @@ done
 lipo -create "$work/arm64" "$work/x86_64" -output "$work/ShadTools"
 swift scripts/icon.swift "$work/Shad.iconset"
 iconutil -c icns "$work/Shad.iconset" -o "$work/Shad.icns"
-for edition in suite search audio drives color windows; do
+./scripts/prepare-capture-engine.sh "$work/capture-engine"
+for edition in suite search audio drives color windows capture; do
     case "$edition" in
         suite) name='Shad Tools';;
         search) name='Shad Search';;
@@ -25,6 +26,7 @@ for edition in suite search audio drives color windows; do
         drives) name='Shad Eject';;
         color) name='Shad Color';;
         windows) name='Shad Windows';;
+        capture) name='Shad Capture';;
     esac
     id="io.github.syedshad.shadtools.$edition"
     dir="$work/$edition-edition"
@@ -52,8 +54,20 @@ for edition in suite search audio drives color windows; do
 <key>ShadEdition</key><string>$edition</string>
 </dict></plist>
 PLIST
+    case "$edition" in
+        suite|capture)
+            ditto "$work/capture-engine/Helpers" "$app/Contents/Helpers"
+            ditto "$work/capture-engine/Resources" "$app/Contents/Resources"
+            /usr/bin/plutil -insert NSCameraUsageDescription -string "Show your camera as an overlay when you record your screen." "$app/Contents/Info.plist"
+            /usr/bin/plutil -insert NSCameraUseContinuityCameraDeviceType -bool true "$app/Contents/Info.plist"
+            /usr/bin/plutil -insert NSMicrophoneUsageDescription -string "Record your narration when you enable the microphone in Screen Capture." "$app/Contents/Info.plist"
+            ;;
+    esac
     sign_args=(--force --options runtime --sign "${APP_SIGN_IDENTITY:--}")
     if [[ -n "${APP_SIGN_IDENTITY:-}" ]]; then sign_args+=(--timestamp); fi
+    case "$edition" in
+        suite|capture) sign_args+=(--entitlements scripts/capture.entitlements);;
+    esac
     codesign "${sign_args[@]}" "$app"
     codesign --verify --strict "$app"
     cat > "$dir/components.plist" <<COMPONENTS
@@ -89,6 +103,13 @@ XML
     fi
     mv "$pkg" "$output/"
     mkdir -p "$output/apps"
-    ditto "$app" "$output/apps/$name.app"
+    # Replace the whole bundle so a removed resource cannot survive an incremental build.
+    if [[ -e "$output/apps/$name.app" ]]; then
+        mv "$output/apps/$name.app" "$dir/previous.app"
+    fi
+    if ! mv "$app" "$output/apps/$name.app"; then
+        if [[ -e "$dir/previous.app" ]]; then mv "$dir/previous.app" "$output/apps/$name.app"; fi
+        exit 1
+    fi
 done
-(cd "$output" && shasum -a 256 "Shad-Tools-$version.pkg" "Shad-Search-$version.pkg" "Shad-Audio-$version.pkg" "Shad-Eject-$version.pkg" "Shad-Color-$version.pkg" "Shad-Windows-$version.pkg" > "SHA256SUMS-$version.txt")
+(cd "$output" && shasum -a 256 "Shad-Tools-$version.pkg" "Shad-Search-$version.pkg" "Shad-Audio-$version.pkg" "Shad-Eject-$version.pkg" "Shad-Color-$version.pkg" "Shad-Windows-$version.pkg" "Shad-Capture-$version.pkg" > "SHA256SUMS-$version.txt")

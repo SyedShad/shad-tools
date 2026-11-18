@@ -1,6 +1,7 @@
 import AppKit
 import CoreAudio
 import CryptoKit
+import SwiftUI
 
 enum AudioRoute: String, CaseIterable {
     case input, output
@@ -86,15 +87,6 @@ struct CoreAudioRoutes: AudioRouting {
     }
 }
 
-enum AudioPinPolicy {
-    static func target(uid: String?, route: AudioRoute, current: AudioDeviceID?, devices: [RouteDevice]) -> RouteDevice? {
-        guard let uid,
-              let candidate = devices.first(where: { $0.uid == uid && $0.routes.contains(route) }),
-              candidate.id != current else { return nil }
-        return candidate
-    }
-}
-
 private final class AudioListener {
     private let system = AudioObjectID(kAudioObjectSystemObject)
     private let block: AudioObjectPropertyListenerBlock
@@ -119,36 +111,41 @@ private final class AudioListener {
 }
 
 @MainActor
-final class AudioTool {
+final class AudioTool: ObservableObject {
     private let core: AudioRouting
-    // The suite and standalone need the same pins when both are running.
-    private let defaults: UserDefaults
+    private let store: AudioPriorityStore
     private static let preferenceEvent = Notification.Name("io.github.syedshad.ShadTools.audio.pinChanged")
     private var listener: AudioListener?
     private var preferenceObserver: NSObjectProtocol?
     private var wakeObserver: NSObjectProtocol?
     private var pendingRefresh: Task<Void, Never>?
-    private var devices: [RouteDevice] = []
-    private var current: [AudioRoute: AudioDeviceID] = [:]
-    private var retryCount: [AudioRoute: Int] = [:]
-    private var errors: [AudioRoute: OSStatus] = [:]
     private var retries: Task<Void, Never>?
+    private var attempts = 0
+    private var window: NSWindow?
+
+    @Published var editorRoute: AudioRoute = .input
+    @Published private(set) var devices: [RouteDevice] = []
+    @Published private(set) var current: [AudioRoute: AudioDeviceID] = [:]
+    @Published private(set) var lists: [AudioRoute: AudioPriorityList] = [:]
+    @Published private(set) var errors: [AudioRoute: String] = [:]
 
     convenience init() {
-        self.init(core: CoreAudioRoutes(), defaults: UserDefaults(suiteName: "io.github.syedshad.ShadTools.audio")!)
+        let shared = "io.github.syedshad.ShadTools.audio"
+        let lock = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Preferences/" + shared + ".lock")
+        self.init(core: CoreAudioRoutes(), defaults: UserDefaults(suiteName: shared)!, lockFile: lock)
         listener = AudioListener { [weak self] in self?.scheduleRefresh() }
-        preferenceObserver = DistributedNotificationCenter.default().addObserver(
-            forName: Self.preferenceEvent, object: nil, queue: .main
-        ) { [weak self] _ in Task { @MainActor in self?.scheduleRefresh() } }
-        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
-        ) { [weak self] _ in Task { @MainActor in self?.scheduleRefresh() } }
+        preferenceObserver = DistributedNotificationCenter.default().addObserver(forName: Self.preferenceEvent, object: nil, queue: .main) {
+            [weak self] _ in Task { @MainActor in self?.scheduleRefresh() }
+        }
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) {
+            [weak self] _ in Task { @MainActor in self?.scheduleRefresh() }
+        }
         scheduleRefresh()
     }
 
-    init(core: AudioRouting, defaults: UserDefaults) {
+    init(core: AudioRouting, defaults: UserDefaults, lockFile: URL? = nil) {
         self.core = core
-        self.defaults = defaults
+        store = AudioPriorityStore(defaults: defaults, lockFile: lockFile)
         synchronizeDevices()
     }
 
@@ -159,113 +156,134 @@ final class AudioTool {
         retries?.cancel()
     }
 
-    private func preference(_ route: AudioRoute) -> [String: String]? {
-        defaults.dictionary(forKey: route.rawValue) as? [String: String]
-    }
-
     private func scheduleRefresh() {
-        pendingRefresh?.cancel()
+        guard pendingRefresh == nil else { return }
         pendingRefresh = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 75_000_000)
             guard !Task.isCancelled, let self else { return }
-            self.synchronizeDevices()
+            pendingRefresh = nil
+            synchronizeDevices()
             Commands.changed()
         }
     }
 
     func synchronizeDevices() {
-        defaults.synchronize()
-        devices = core.devices()
-        var needsRetry = false
+        let live = core.devices()
+        var active: [AudioRoute: AudioDeviceID] = [:]
+        var latest: [AudioRoute: AudioPriorityList] = [:]
+        var problems: [AudioRoute: String] = [:]
         for route in AudioRoute.allCases {
-            current[route] = core.current(route)
-            guard let target = AudioPinPolicy.target(uid: preference(route)?["uid"], route: route,
-                                                     current: current[route], devices: devices) else {
-                retryCount[route] = nil
-                errors[route] = nil
-                continue
-            }
+            let selected = core.current(route)
+            active[route] = selected
+            let list = store.update(route) { $0.discover(live, route: route, initialDefault: selected) }
+            latest[route] = list
+            guard let target = list.winner(for: route, among: live), target.id != selected else { continue }
             let status = core.set(target.id, for: route)
-            if status == noErr {
-                current[route] = core.current(route)
-                errors[route] = nil
-            } else {
-                errors[route] = status
-            }
-            if current[route] != target.id, retryCount[route, default: 0] < 3 {
-                retryCount[route, default: 0] += 1
-                needsRetry = true
+            active[route] = core.current(route)
+            if active[route] != target.id {
+                problems[route] = status == noErr ? "Waiting for " + target.name : "Couldn’t select " + target.name + " (Core Audio " + String(status) + ")"
             }
         }
-        if needsRetry {
+        if devices != live { devices = live }
+        if lists != latest { lists = latest }
+        if current != active { current = active }
+        if errors != problems { errors = problems }
+        if problems.isEmpty {
             retries?.cancel()
+            retries = nil
+            attempts = 0
+        } else if retries == nil {
+            let delay = UInt64(300_000_000) << min(attempts, 4)
+            attempts = min(attempts + 1, 4)
             retries = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 450_000_000)
-                guard !Task.isCancelled else { return }
-                self?.synchronizeDevices()
+                try? await Task.sleep(nanoseconds: delay)
+                guard !Task.isCancelled, let self else { return }
+                retries = nil
+                synchronizeDevices()
                 Commands.changed()
             }
         }
     }
 
-    private func save(_ device: RouteDevice?, for route: AudioRoute) {
-        if let device {
-            guard let live = core.devices().first(where: { $0.uid == device.uid && $0.routes.contains(route) }) else {
-                Feedback.show("\(device.name) is disconnected")
-                return
-            }
-            let status = core.set(live.id, for: route)
-            guard status == noErr else {
-                Feedback.show("Couldn’t select \(device.name) · Core Audio error \(status)")
-                return
-            }
-            defaults.set(["uid": live.uid, "name": live.name], forKey: route.rawValue)
-            Feedback.show("Pinned \(route.rawValue) to \(live.name)")
-        } else {
-            defaults.removeObject(forKey: route.rawValue)
-            Feedback.show("Automatic \(route.rawValue) switching enabled")
-        }
-        defaults.synchronize()
-        retryCount[route] = nil
+    private func edit(_ route: AudioRoute, _ transform: (inout AudioPriorityList) -> Void) {
+        _ = store.update(route, transform)
+        synchronizeDevices()
         DistributedNotificationCenter.default().postNotificationName(Self.preferenceEvent, object: nil, userInfo: nil, deliverImmediately: true)
-        scheduleRefresh()
+        Commands.changed()
+    }
+
+    func move(_ uid: String, in route: AudioRoute, by offset: Int) {
+        edit(route) { list in
+            if let index = list.devices.firstIndex(where: { $0.uid == uid }) {
+                list.move(uid, to: index + offset)
+            }
+        }
+    }
+
+    func promote(_ uid: String, in route: AudioRoute) {
+        edit(route) {
+            $0.move(uid, to: 0)
+            $0.enabled = true
+        }
+    }
+
+    func setEnabled(_ enabled: Bool, for route: AudioRoute) {
+        edit(route) { $0.enabled = enabled }
+    }
+
+    func forget(_ uid: String, in route: AudioRoute) {
+        guard !core.devices().contains(where: { $0.uid == uid && $0.routes.contains(route) }) else { return }
+        edit(route) { $0.devices.removeAll { $0.uid == uid } }
+    }
+
+    private func showList(_ route: AudioRoute) {
+        if window == nil {
+            let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 538, height: 416),
+                                 styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+            panel.title = "Audio Priorities"
+            panel.minSize = NSSize(width: 430, height: 300)
+            panel.isReleasedWhenClosed = false
+            panel.center()
+            window = panel
+        }
+        editorRoute = route
+        window?.contentView = NSHostingView(rootView: AudioPriorityEditor(tool: self))
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
     }
 
     func commands() -> [ToolCommand] {
-        var result: [ToolCommand] = []
+        var commands: [ToolCommand] = []
         for route in AudioRoute.allCases {
-            let saved = preference(route)
-            let label = route.rawValue.capitalized
-            for device in devices where device.routes.contains(route) {
-                let pinned = saved?["uid"] == device.uid
-                let active = current[route] == device.id
-                var detail = pinned ? "Pinned \(route.rawValue)" : "Keep this \(route.rawValue) when devices connect"
-                if active { detail += " · Current default" }
-                if pinned, let error = errors[route] { detail = "Couldn’t restore · Core Audio error \(error)" }
-                let suffix = SHA256.hash(data: Data(device.uid.utf8)).map { String(format: "%02x", $0) }.joined()
-                result.append(ToolCommand(id: "audio.pin.\(route.rawValue).\(suffix)", title: "Pin \(label) to \(device.name)",
-                                          subtitle: detail, symbol: pinned ? "pin.fill" : route.symbol, group: "Audio",
-                                          keywords: "default sound microphone headphones speakers lock device") { [weak self] in
-                    self?.save(device, for: route)
+            let direction = route.rawValue.capitalized
+            let list = lists[route] ?? AudioPriorityList()
+            let winner = list.winner(for: route, among: devices)
+            commands.append(ToolCommand(id: "audio.manage." + route.rawValue, title: "Manage " + direction + " Priorities",
+                                        subtitle: list.enabled ? (winner?.name ?? "Waiting for a connected device") : "macOS automatic routing",
+                                        symbol: "list.number", group: "Audio", keywords: "rank hierarchy reorder priority microphone headphones speakers default") { [weak self] in
+                self?.showList(route)
+            })
+            for (index, entry) in list.devices.enumerated() {
+                let stableID = SHA256.hash(data: Data(entry.uid.utf8)).map { String(format: "%02x", $0) }.joined()
+                let active = devices.first { $0.uid == entry.uid && $0.routes.contains(route) }
+                let status = active == nil ? "Disconnected" : current[route] == active?.id ? "Current default" : "Connected"
+                commands.append(ToolCommand(id: "audio.pin." + route.rawValue + "." + stableID,
+                                            title: "Make " + entry.name + " First for " + direction,
+                                            subtitle: "Priority " + String(index + 1) + " · " + status, symbol: route.symbol, group: "Audio",
+                                            keywords: "pin default sound microphone headphones speakers lock hierarchy priority") { [weak self] in
+                    self?.promote(entry.uid, in: route)
+                    Feedback.show(entry.name + " is first for " + route.rawValue)
                 })
             }
-            if let saved {
-                let connected = devices.contains { $0.uid == saved["uid"] && $0.routes.contains(route) }
-                var detail = saved["name"] ?? label
-                if !connected { detail += " · Reconnect to restore" }
-                result.append(ToolCommand(id: "audio.unpin.\(route.rawValue)", title: "Unpin Audio \(label)",
-                                          subtitle: detail, symbol: "pin.slash", group: "Audio",
-                                          keywords: "automatic default sound unlock") { [weak self] in
-                    self?.save(nil, for: route)
-                })
-            }
-        }
-        if result.isEmpty {
-            result.append(ToolCommand(id: "audio.refresh", title: "Refresh Audio Devices", subtitle: "Check for available inputs and outputs",
-                                      symbol: "arrow.clockwise", group: "Audio", keywords: "microphone speakers headphones") { [weak self] in
-                self?.scheduleRefresh()
+            let toggleTitle = list.enabled ? "Use macOS Automatic " + direction : "Use " + direction + " Priorities"
+            let toggleID = list.enabled ? "audio.unpin." : "audio.enable."
+            commands.append(ToolCommand(id: toggleID + route.rawValue, title: toggleTitle,
+                                        subtitle: list.enabled ? "Pause this priority list" : "Use the highest-ranked connected device",
+                                        symbol: "arrow.triangle.2.circlepath", group: "Audio", keywords: "automatic unpin pause restore hierarchy") { [weak self] in
+                self?.setEnabled(!list.enabled, for: route)
+                Feedback.show(toggleTitle)
             })
         }
-        return result
+        return commands
     }
 }

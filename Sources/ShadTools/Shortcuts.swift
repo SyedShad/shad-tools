@@ -46,6 +46,7 @@ struct KeyChord: Codable, Equatable {
         case .drives: launcher = KeyChord(2, tri, "D")
         case .color: launcher = KeyChord(8, tri, "C")
         case .windows: launcher = KeyChord(13, tri, "W")
+        case .capture: launcher = KeyChord(35, tri, "P")
         }
         var bindings = ["app.open": launcher]
         if edition == .suite || edition == .drives { bindings["drives.eject-all"] = KeyChord(14, tri, "E") }

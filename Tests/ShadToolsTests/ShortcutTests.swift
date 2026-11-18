@@ -4,7 +4,8 @@ import Testing
 
 @Test func independentLaunchersCanRunTogether() {
     let keys = Edition.allCases.compactMap { KeyChord.defaults($0)["app.open"] }
-    #expect(keys.count == 6)
+    #expect(keys.count == Edition.allCases.count)
+    #expect(KeyChord.defaults(.capture)["app.open"]?.label == "⌃⌥⌘P")
     for (index, key) in keys.enumerated() {
         #expect(!keys.dropFirst(index + 1).contains(where: key.matches))
     }

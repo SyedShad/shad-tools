@@ -1,5 +1,4 @@
 import AppKit
-import SwiftUI
 
 struct ToolCommand: Identifiable {
     let id: String
@@ -38,7 +37,7 @@ struct ToolCommand: Identifiable {
 }
 
 enum Edition: String, CaseIterable {
-    case suite, search, audio, drives, color, windows
+    case suite, search, audio, drives, color, windows, capture
     static var current: Edition {
         let key = Bundle.main.object(forInfoDictionaryKey: "ShadEdition") as? String
         return Edition(rawValue: key ?? "suite") ?? .suite
@@ -51,6 +50,7 @@ enum Edition: String, CaseIterable {
         case .drives: return "Shad Eject"
         case .color: return "Shad Color"
         case .windows: return "Shad Windows"
+        case .capture: return "Shad Capture"
         }
     }
     var group: String {
@@ -61,6 +61,7 @@ enum Edition: String, CaseIterable {
         case .drives: return "Drives"
         case .color: return "Color"
         case .windows: return "Windows"
+        case .capture: return "Capture"
         }
     }
     var category: String {
@@ -71,16 +72,18 @@ enum Edition: String, CaseIterable {
         case .drives: return "Easy Eject"
         case .color: return "Color Picker"
         case .windows: return "Window Layouts"
+        case .capture: return "Screen Capture"
         }
     }
     var detail: String {
         switch self {
         case .suite: return ""
         case .search: return "Applications, files and folders"
-        case .audio: return "Pin your microphone and speakers"
+        case .audio: return "Rank input and output devices independently"
         case .drives: return "Safely eject external drives"
         case .color: return "Sample a pixel and copy its color"
         case .windows: return "Tile windows and link their edges"
+        case .capture: return "Take screenshots and record your screen with a camera overlay"
         }
     }
     var symbol: String {
@@ -91,15 +94,7 @@ enum Edition: String, CaseIterable {
         case .drives: return "eject.fill"
         case .color: return "eyedropper"
         case .windows: return "rectangle.split.2x1"
-        }
-    }
-    var tint: Color {
-        switch self {
-        case .suite, .search: return Color(red: 0.08, green: 0.52, blue: 0.48)
-        case .audio: return .indigo
-        case .drives: return Color(red: 0.67, green: 0.39, blue: 0.12)
-        case .color: return Color(red: 0.72, green: 0.24, blue: 0.45)
-        case .windows: return Color(red: 0.17, green: 0.43, blue: 0.72)
+        case .capture: return "camera.viewfinder"
         }
     }
     var includesSearch: Bool { self == .suite || self == .search }
